@@ -1,4 +1,4 @@
-# Playwright Step Repair Engine
+# Playwright Executor + Step Repair Engine
 
 > **Created by:** Mokshith Balidi  
 > **Created in:** January 2026  
