@@ -4,25 +4,28 @@
 
 ### For First-Time Users
 
-1. **What is this?** 
-   → Automated test repair using AI (Gemini LLM)
+1. **What is this?**  
+   → Automated Playwright test repair using AI (Google Gemini LLM)
 
 2. **How do I run it locally?**
    ```bash
-   # Run with pretty colorized developer logs
+   # Activate venv first
+   .\venv\Scripts\activate   # Windows
+   source venv/bin/activate   # Linux / macOS
+
+   # Run with pretty colorized developer logs (default: binds to 127.0.0.1:8000)
    python run.py --mode pretty
-   
-   # Or run using Docker
+
+   # Or run using Docker (app listens on port 8080 inside container)
    docker build -t repair-engine:latest .
-   docker run -p 8000:8080 -e GOOGLE_API_KEY="your-key" repair-engine:latest
+   docker run -p 8080:8080 -e GOOGLE_API_KEY="your-key" repair-engine:latest
    ```
 
 3. **How do I use it?**
    ```bash
-   curl -X POST http://localhost:8000/repair \
-     -H "X-API-Key: key" \
-     -H "Content-Type: application/json" \
-     -d '{
+   curl -X POST http://127.0.0.1:8000/repair \
+     -H "X-API-Key: client_sec_key" \
+     -F 'payload={
        "step_id": "test_1",
        "step_intent": "Click login",
        "original_code": "await page.click(\"#btn\")",
@@ -38,20 +41,26 @@
 ### Development
 
 ```bash
-# Start locally with pretty logs (Default reload enabled on app/ directory)
+# Start locally with pretty logs (auto-reload on app/ directory)
 python run.py --mode pretty
 
-# Start locally in JSON logs mode (for staging simulations)
+# Start without reload (cleaner for executor runs)
+python run.py --no-reload
+
+# Start with JSON logs (staging simulation)
 python run.py --mode json
 
-# View metrics
-curl http://localhost:8000/metrics
+# Pass a custom host/port
+python run.py --host 0.0.0.0 --port 8080
 
 # Run tests
-python -m pytest
+python -m pytest -q
 
 # Run tests with coverage
 pytest --cov=app --cov-report=html
+
+# View Prometheus metrics
+curl http://127.0.0.1:8000/metrics
 ```
 
 ### Deployment
@@ -60,18 +69,26 @@ pytest --cov=app --cov-report=html
 # Build image
 docker build -t repair-engine:latest .
 
+# Run container (app binds to 0.0.0.0:8080 inside container)
+docker run -p 8080:8080 \
+  -e GOOGLE_API_KEY="your-key" \
+  -e MONGODB_URL="mongodb+srv://..." \
+  repair-engine:latest
+
 # Deploy to Kubernetes
 kubectl apply -f api-deployment.yaml
 
-# Scale api instances
+# Scale API instances
 kubectl scale deployment repair-engine-api --replicas=5
 ```
 
 ### Database (MongoDB)
 
 ```bash
-# View active database indexes
-mongosh "mongodb://localhost:27017/repair_db" --eval "db.repair_records.getIndexes()"
+# View active indexes
+mongosh "mongodb://localhost:27017/repair_engine" --eval "db.repair_records.getIndexes()"
+
+# Indexes are auto-created on startup — no migration commands needed
 ```
 
 ---
@@ -81,38 +98,48 @@ mongosh "mongodb://localhost:27017/repair_db" --eval "db.repair_records.getIndex
 ### Health Checks
 
 ```bash
-# Is it running?
-curl http://localhost:8000/health/live
+# Is it alive?
+curl http://127.0.0.1:8000/health/live
 
 # Can it serve traffic?
-curl http://localhost:8000/health/ready
+curl http://127.0.0.1:8000/health/ready
 
-# Show all metrics
-curl http://localhost:8000/metrics
+# Full observability including LLM ping
+curl http://127.0.0.1:8000/health/deep
+
+# Show all Prometheus metrics
+curl http://127.0.0.1:8000/metrics
+
+# App metadata
+curl http://127.0.0.1:8000/info
 ```
 
 ### Repair Endpoint
 
 ```bash
-# Simple repair request (multipart/form-data)
-curl -X POST http://localhost:8000/repair \
+# Repair a failing step (multipart/form-data with optional screenshot)
+curl -X POST http://127.0.0.1:8000/repair \
   -H "X-API-Key: client_sec_key" \
-  -F "payload={
-    \"step_id\": \"step_1\",
-    \"step_intent\": \"Click Login Button\",
-    \"original_code\": \"await page.click('#login-btn')\",
-    \"error_classification\": {\"type\": \"LOCATOR_NOT_FOUND\"},
-    \"error_details\": {\"message\": \"Timeout\"}
-  }"
+  -F 'payload={
+    "step_id": "step_1",
+    "step_intent": "Click Login Button",
+    "original_code": "await page.click('"'"'#login-btn'"'"')",
+    "error_classification": {"type": "LOCATOR_NOT_FOUND"},
+    "error_details": {"message": "Timeout"}
+  }'
 ```
 
 ### Execute Script
 
 ```bash
-# Run script with self-healing (multipart/form-data)
-curl -X POST http://localhost:8000/executor/run \
+# Run script with self-healing executor
+curl -X POST http://127.0.0.1:8000/executor/run \
   -H "X-API-Key: client_sec_key" \
   -F "script=@tests/scripts/failing_test.py"
+
+# Get executor statistics
+curl http://127.0.0.1:8000/executor/stats \
+  -H "X-API-Key: client_sec_key"
 ```
 
 ---
@@ -120,21 +147,73 @@ curl -X POST http://localhost:8000/executor/run \
 ## File Structure Cheat Sheet
 
 ```
-/app/
-  main.py                 → App entry point & log layout setup
-  core/
-    config.py            → Settings manager & list validations
-    database.py          → Motor MongoDB connection pool
-    exceptions/          → Exceptions package (base, api, repair, executor)
-    repositories/        → Database repositories (base, in_memory, mongo)
-    dom_pruner.py        → HTML DOM to AST tag-tree compressor
-    llm_executor.py      → Gemini API wrapper with rate limit fallback
-  executors/             → Sandbox execution engine (sandbox, python, base)
-  models/                → Pydantic models (cir, database schemas, step_repair)
-  routes/                → FastAPI endpoints (repair, executor, health, metrics)
-  services/              → Code generation & healing orchestrator
-    extractors/          → Registry & Action Extractors (Base, Click, Type, etc.)
-  tasks/                 → Celery workers tasks
+app/
+├── api/v1/                    → Compatibility wrappers re-exporting live routes
+├── core/
+│   ├── exceptions/            → Exception package (base, api, repair, executor)
+│   ├── repositories/          → DB repos (base, in_memory, mongo)
+│   ├── base64_utils.py        → Base64 image validators
+│   ├── config.py              → Settings manager & env variable definitions
+│   ├── database.py            → Motor MongoDB connection manager with timeouts
+│   ├── dom_pruner.py          → Compresses HTML to an AST-style tag tree
+│   ├── health.py              → System health monitors & readiness checks
+│   ├── io.py                  → Atomic file writer with write-fallback logic
+│   ├── llm_executor.py        → Gemini API wrapper with rate-limit retries
+│   ├── llm_json.py            → Cleans & parses JSON responses from the LLM
+│   ├── metrics.py             → Prometheus metric definitions
+│   ├── prompts.py             → Central registry for all LLM prompt templates
+│   ├── redis_state.py         → Distributed state & cache management
+│   ├── resilience.py          → CircuitBreaker & exponential backoff
+│   ├── security.py            → API key auth & rate limit middleware
+│   ├── tracing.py             → OpenTelemetry span wrappers
+│   └── utils.py               → Hashing, timers, correlation contextvars
+├── executors/
+│   ├── base.py                → Abstract executor base class
+│   ├── models.py              → ExecutionResult models
+│   ├── python.py              → Subprocess runner with secret-env stripping
+│   └── sandbox.py            → AST-based security auditor (blocks forbidden ops)
+├── models/
+│   ├── cir.py                 → Canonical Intermediate Representation schemas
+│   ├── context.py             → Runtime validation context models
+│   ├── database.py            → DB persistence schemas (RepairRecord, ExecutionRecord)
+│   ├── extraction.py          → Locator value models returned from extractors
+│   └── step_repair.py         → Pydantic schemas for /repair endpoint
+├── routes/
+│   ├── executor.py            → /executor and /executor/run routes
+│   ├── health.py              → /health/* routes
+│   ├── metrics.py             → /metrics route
+│   └── repair.py              → /repair route
+├── services/
+│   ├── extractors/            → Action extractor package
+│   │   ├── BaseExtractor.py   → Parent class with literal-guard utility
+│   │   ├── ClickExtractor.py  → Click locator extraction via LLM
+│   │   ├── TypeExtractor.py   → Type/fill target & value extraction
+│   │   ├── SelectExtractor.py → Dropdown & select option extraction
+│   │   ├── AssertExtractor.py → Assertion & URL-contains extraction
+│   │   ├── DialogExtractor.py → Runtime JS dialog interception
+│   │   └── ExtractorFactory.py → Maps ActionType → extractor class
+│   ├── atomic_normalizer.py   → Text normalizer and spacing standardizer
+│   ├── auto_repair_trigger.py → Parses failure dirs to build RepairRequests
+│   ├── cir_builder.py         → Builds CIR blocks from StepRepairRequests
+│   ├── diff.py                → Unified diff utility for patched code
+│   ├── execution_orchestrator.py → Manages healing loops & run directories
+│   ├── generator.py           → Generates Playwright code from locators
+│   ├── llm_classifier.py      → Classifies action types via LLM
+│   ├── llm_fallback_repair.py → Secondary repair loop with full code context
+│   ├── repair_explanation_service.py → Summarizes script modifications
+│   ├── repair_pipeline.py     → Orchestrates CIR build → gen → sandbox verify
+│   ├── repair_service.py      → FastAPI-level repair actions handler
+│   ├── rollback.py            → Backs up and restores scripts on failure
+│   ├── script_patcher.py      → Patches step body & guarded-step string args
+│   ├── step_modifier.py       → Generates modified code variations
+│   ├── step_verifier.py       → Validates proposals in sandboxed subprocesses
+│   └── validator.py           → Pre-flight code and intent validators
+├── tasks/
+│   ├── celery_app.py          → Celery application configuration
+│   └── repair_tasks.py        → Async Celery worker task definitions
+├── main.py                    → FastAPI app entry point, logging setup, lifespan
+└── middleware.py              → Audit log & request timing middleware
+run.py                         → Developer startup wrapper for uvicorn
 ```
 
 ---
@@ -142,37 +221,49 @@ curl -X POST http://localhost:8000/executor/run \
 ## Configuration Quick Setup
 
 ```bash
-# Copy template
-cp .env.example .env
+# Copy and edit the env template
+cp .env.example .env   # or create .env manually
 
-# Edit essential variables
-export GOOGLE_API_KEY="your-gemini-key"
-export MONGODB_URL="mongodb://localhost:27017"
-export REDIS_URL="redis://localhost:6379/0"
+# Minimum required variables
+GOOGLE_API_KEY=your-gemini-key
+ALLOWED_API_KEYS=["client_sec_key"]
+ENABLE_API_AUTH=true
+
+# Add MongoDB for durable persistence
+MONGODB_URL=mongodb://localhost:27017
+MONGODB_DB_NAME=repair_engine
+
+# Add Redis for distributed state and Celery
+REDIS_URL=redis://localhost:6379/0
 
 # Run locally
 python run.py --mode pretty
 ```
+
+> **Note:** MongoDB indexes are created automatically on startup. No migration commands (Alembic/SQL) are required.
 
 ---
 
 ## Monitoring Quick Access
 
 ```bash
-# Prometheus
+# Prometheus scrape endpoint
+http://127.0.0.1:8000/metrics
+
+# Prometheus UI (if self-hosted)
 http://localhost:9090
 
 # Grafana
-http://localhost:3000 (admin/admin)
+http://localhost:3000   (default: admin/admin)
 
-# Jaeger Tracing
+# Jaeger Tracing (if ENABLE_TRACING=true)
 http://localhost:16686
 
-# API Docs
-http://localhost:8000/docs
+# Interactive API Docs (Swagger UI)
+http://127.0.0.1:8000/docs
 
-# Health Check
-http://localhost:8000/health/ready
+# Health Readiness Check
+http://127.0.0.1:8000/health/ready
 ```
 
 ---
@@ -181,33 +272,51 @@ http://localhost:8000/health/ready
 
 | Issue | Quick Fix |
 |-------|-----------|
-| Port already in use | `docker-compose down` then `docker-compose up` |
-| Database connection error | Check `DATABASE_URL` in `.env` |
-| Rate limit exceeded | Increase `RATE_LIMIT_PER_MINUTE` in config |
-| LLM timeout | Increase `LLM_TIMEOUT_SECONDS` |
-| Out of memory | Scale horizontally: `docker-compose up -d --scale api=3` |
+| Port already in use | Check for zombie python.exe processes: `tasklist /FI "IMAGENAME eq python.exe"` and `taskkill /PID <pid> /F` |
+| `uvicorn` not found | Activate venv: `.\venv\Scripts\activate` |
+| MongoDB connection error | Check `MONGODB_URL` in `.env` |
+| Rate limit exceeded | Increase `RATE_LIMIT_REQUESTS_PER_MINUTE` in config |
+| LLM timeout | Increase `LLM_TIMEOUT_SECONDS` in `.env` |
 | Tests failing | Run `pytest tests/ -v` to see details |
+| `503 Executor sandbox disabled` | Set `ENABLE_SANDBOX_EXECUTION=true` or `SANDBOX_USE_DOCKER=true` |
+| `ImportError: cannot import global_exception_handler` | Delete `app/core/exceptions.py` if it exists alongside the `exceptions/` folder |
 
 ---
 
 ## Environment Variables (Essentials Only)
 
 ```bash
-# Must have
-GOOGLE_API_KEY=...              # Gemini API key
-API_SECRET_KEY=...              # Random secret key
-DATABASE_URL=postgresql://...   # PostgreSQL connection
+# ── Required ──────────────────────────────────────────────────
+GOOGLE_API_KEY=...                    # Primary Gemini API key
+API_SECRET_KEY=...                    # Random secret for auth
+ALLOWED_API_KEYS=["client_sec_key"]   # Accepted API keys list
 
-# Should have
-REDIS_URL=redis://...           # Redis connection
-ENV=production                  # Environment
-LOG_LEVEL=INFO                  # Logging level
+# ── Database ──────────────────────────────────────────────────
+MONGODB_URL=mongodb://...             # MongoDB connection string
+MONGODB_DB_NAME=repair_engine         # Target database name
 
-# Optional with defaults
-ENABLE_MULTIMODAL=true          # LLM with images
-ENABLE_AUTO_REPAIR=true         # Auto repair on fail
-MAX_REPAIR_ATTEMPTS=3           # Max retries
-RATE_LIMIT_PER_MINUTE=100       # API throttle
+# ── Redis & Celery ────────────────────────────────────────────
+REDIS_URL=redis://localhost:6379/0    # Redis connection
+CELERY_BROKER_URL=redis://localhost:6379/1
+CELERY_RESULT_BACKEND=redis://localhost:6379/2
+
+# ── Logging ───────────────────────────────────────────────────
+LOG_LEVEL=INFO                        # DEBUG | INFO | WARNING | ERROR
+LOG_FORMAT_MODE=PRETTY                # PRETTY | CONSOLE | JSON
+ENV=development                       # development | staging | production
+
+# ── Feature Flags ─────────────────────────────────────────────
+ENABLE_API_AUTH=true                  # API key authentication
+ENABLE_SELF_HEALING=true              # Auto-repair on executor failures
+ENABLE_SANDBOX_EXECUTION=true         # Strict code sandboxing
+ENABLE_METRICS=true                   # Prometheus /metrics endpoint
+ENABLE_TRACING=false                  # OpenTelemetry tracing
+
+# ── Optional Tuning ───────────────────────────────────────────
+MAX_LLM_MODIFICATIONS=1               # Max LLM repair iterations per step
+LLM_TIMEOUT_SECONDS=150               # Gemini API call timeout
+RATE_LIMIT_REQUESTS_PER_MINUTE=60     # API throttle (requests/min)
+SANDBOX_USE_DOCKER=false              # Use Docker for script isolation
 ```
 
 ---
@@ -216,12 +325,13 @@ RATE_LIMIT_PER_MINUTE=100       # API throttle
 
 | Code | Status | Meaning |
 |------|--------|---------|
-| `INVALID_API_KEY` | 401 | Wrong/missing API key |
+| `INVALID_API_KEY` | 401 | Wrong or missing API key |
 | `RATE_LIMIT_EXCEEDED` | 429 | Too many requests |
 | `INVALID_REQUEST` | 400 | Bad request format |
-| `LLM_TIMEOUT` | 504 | Gemini API timeout |
+| `LLM_TIMEOUT` | 504 | Gemini API timed out |
 | `DATABASE_ERROR` | 500 | DB connection failed |
 | `CIRCUIT_BREAKER_OPEN` | 503 | Service temporarily down |
+| `EXECUTOR_SANDBOX_DISABLED` | 503 | Sandbox disabled or unavailable |
 
 ---
 
@@ -229,12 +339,12 @@ RATE_LIMIT_PER_MINUTE=100       # API throttle
 
 | Status | Meaning |
 |--------|---------|
-| 200 | Success (even if repair failed - check `status` field) |
+| 200 | Success (check `status` field — repair may still have failed gracefully) |
 | 400 | Bad request format |
 | 401 | Unauthorized (invalid API key) |
 | 429 | Rate limited |
 | 500 | Server error |
-| 503 | Service unavailable |
+| 503 | Service unavailable / sandbox disabled |
 
 ---
 
@@ -289,6 +399,8 @@ celery -A app.tasks.celery_app events
 celery -A app.tasks.celery_app inspect scheduled
 ```
 
+> Celery workers are **optional**. The engine runs fully synchronously without them.
+
 ---
 
 ## Redis Quick Commands
@@ -300,11 +412,8 @@ redis-cli
 # Check memory usage
 redis-cli INFO memory
 
-# View all keys
-redis-cli KEYS "*"
-
-# Clear all data
-redis-cli FLUSHALL
+# View all repair-engine keys
+redis-cli KEYS "repair:*"
 
 # Monitor commands in real-time
 redis-cli MONITOR
@@ -314,6 +423,9 @@ redis-cli GET key-name
 
 # Delete key
 redis-cli DEL key-name
+
+# Clear all data (CAUTION: destructive)
+redis-cli FLUSHALL
 ```
 
 ---
@@ -321,13 +433,9 @@ redis-cli DEL key-name
 ## Documentation Quick Links
 
 | Document | Purpose | Read Time |
-|----------|---------|-----------|
-| README.md | Complete overview | 30-45 min |
-| ARCHITECTURE.md | System design | 25-35 min |
-| API.md | API reference | 20-25 min |
-| DEPLOYMENT.md | Operations guide | 30-40 min |
-| DOCUMENTATION_SUMMARY.md | Navigation guide | 10-15 min |
-| QUICK_REFERENCE.md | This file | 5 min |
+|----------|---------|-----------| 
+| README.md | Complete overview + API reference | 30–45 min |
+| QUICK_REFERENCE.md | This file — commands & cheatsheet | 5 min |
 
 ---
 
@@ -335,16 +443,16 @@ redis-cli DEL key-name
 
 ```
 Service down?
-├─ YES → Check: docker-compose logs -f
+├─ YES → Check: python processes still running? Kill zombies with tasklist/taskkill
 ├─ NO → API responding?
-│   ├─ NO → Check: curl http://localhost:8000/health/live
-│   ├─ YES → Check health status?
-│   │   ├─ Not ready → Check: curl http://localhost:8000/health/ready
+│   ├─ NO → curl http://127.0.0.1:8000/health/live
+│   ├─ YES → Health status?
+│   │   ├─ Not ready → curl http://127.0.0.1:8000/health/ready (check MONGODB_URL)
 │   │   ├─ Ready → Can process?
-│   │   │   ├─ NO → Check: API logs for errors
-│   │   │   ├─ YES → Check results?
-│   │   │   │   ├─ Wrong → Check: Request format
-│   │   │   │   ├─ Error → Check: Error code mapping
+│   │   │   ├─ NO → Check logs for errors
+│   │   │   ├─ YES → Results?
+│   │   │   │   ├─ Wrong → Check request format / X-API-Key header
+│   │   │   │   ├─ Error → Check error code mapping above
 │   │   │   │   └─ OK → Success! ✓
 ```
 
@@ -352,7 +460,7 @@ Service down?
 
 ## Performance Benchmarks
 
-| Metric | Target | Current |
+| Metric | Target | Observed |
 |--------|--------|---------|
 | API Response Time | < 5s | ~3.4s |
 | LLM Processing | < 60s | ~34s avg |
@@ -365,38 +473,46 @@ Service down?
 
 ## Deployment Checklist
 
-- [ ] PostgreSQL running
-- [ ] Redis running
-- [ ] Google API key set
-- [ ] Database migrations run (`alembic upgrade head`)
-- [ ] Environment variables configured
+- [ ] MongoDB running and reachable (`MONGODB_URL` configured)
+- [ ] Redis running (optional, needed for Celery & distributed state)
+- [ ] `GOOGLE_API_KEY` set in `.env`
+- [ ] `ALLOWED_API_KEYS` configured
+- [ ] `ENABLE_API_AUTH=true` confirmed
+- [ ] `ENABLE_SANDBOX_EXECUTION=true` confirmed
+- [ ] Docker sandboxing enabled for production (`SANDBOX_USE_DOCKER=true`)
+- [ ] MongoDB indexes auto-created on startup (check `/health/ready`)
 - [ ] Tests passing (`pytest tests/ -v`)
 - [ ] Health check passing (`curl /health/ready`)
 - [ ] Metrics accessible (`curl /metrics`)
-- [ ] Logging configured
-- [ ] Backups scheduled
-- [ ] Monitoring setup
-- [ ] Load testing done
+- [ ] Logging configured (`LOG_FORMAT_MODE`, `LOG_LEVEL`)
+- [ ] Backups / data retention policy set (TTL: 30 days via MongoDB TTL index)
+- [ ] Monitoring & alerting on `/health/ready`
 
 ---
 
 ## One-Liner Deployments
 
 ```bash
-# Local development
-docker-compose up -d && sleep 5 && curl http://localhost:8000/health
+# Local development (default: 127.0.0.1:8000)
+python run.py
+
+# Local development exposed to network
+python run.py --host 0.0.0.0
+
+# Docker run (container listens on 8080)
+docker run -p 8080:8080 \
+  -e GOOGLE_API_KEY="your-key" \
+  -e MONGODB_URL="mongodb+srv://..." \
+  repair-engine:latest
 
 # Kubernetes
-kubectl apply -f postgres.yaml && kubectl apply -f redis.yaml && kubectl apply -f api-deployment.yaml
+kubectl apply -f api-deployment.yaml
 
 # Scale Kubernetes
 kubectl scale deployment repair-engine-api --replicas=5 -n repair-engine
 
-# Update image in Kubernetes
+# Update image
 kubectl set image deployment/repair-engine-api repair-engine-api=myregistry/repair-engine:latest
-
-# View all resources
-kubectl get all -n repair-engine
 
 # Port forward to local
 kubectl port-forward svc/repair-engine-api 8000:80 -n repair-engine
@@ -404,33 +520,13 @@ kubectl port-forward svc/repair-engine-api 8000:80 -n repair-engine
 
 ---
 
-## Default Passwords & Keys
-
-```bash
-# Development (change in production!)
-Database User: postgres
-Database Password: password
-Grafana Admin: admin
-Grafana Password: admin
-Redis: No authentication (local)
-
-# Production (use environment variables)
-All credentials: Read from vault or secrets manager
-No hardcoded values
-Rotate regularly
-```
-
----
-
 ## Support Resources
 
-1. **Issue** → Check README.md Troubleshooting
-2. **Configuration** → Check .env.example
-3. **API** → Check API.md
-4. **Deployment** → Check DEPLOYMENT.md
-5. **Architecture** → Check ARCHITECTURE.md
-6. **Tests** → Check /tests/ directory
-7. **Code** → Check relevant /app/ file
+1. **Issue** → Check README.md Troubleshooting section
+2. **Configuration** → Check `.env` file & README.md Configuration table
+3. **API** → `http://127.0.0.1:8000/docs` (Swagger UI)
+4. **Code** → Check relevant `/app/` file per the File Structure above
+5. **Tests** → Check `/tests/` directory
 
 ---
 
@@ -441,53 +537,39 @@ Rotate regularly
 - **Author**: Mokshith Balidi
 - **Organization**: TW.2324
 - **Created**: January 2026
-- **Last Updated**: May 31, 2026
+- **Last Updated**: June 1, 2026
 - **Python**: 3.11+
 - **Rights**: All rights reserved by Mokshith Balidi
 
 ---
 
-## Quick Contact Info
-
-- **Documentation**: See all .md files
-- **Issues**: Check troubleshooting section
-- **Questions**: Refer to relevant documentation
-- **Contributions**: Follow project guidelines
-
----
-
 ## Pro Tips 💡
 
-1. **Use logging**: `LOG_LEVEL=DEBUG` for troubleshooting
-2. **Monitor metrics**: Check Prometheus dashboard regularly
-3. **Test before deploy**: Always run `pytest tests/ -v`
-4. **Scale workers**: If queue grows, scale Celery workers
-5. **Monitor LLM costs**: Check `llm_tokens_used_total` metric
-6. **Backup regularly**: Run backups at least daily
-7. **Review logs**: Check logs for patterns in failures
-8. **Keep secrets safe**: Never commit .env files
-9. **Use rate limiting**: Protect against abuse
-10. **Monitor health**: Set up alerts on health checks
+1. **Use pretty mode**: `python run.py --mode pretty` for color-coded, emoji-enriched logs
+2. **No venv activation?** → The startup guard in `run.py` will remind you with exact steps
+3. **Debug logging**: Set `LOG_LEVEL=DEBUG` to see every MongoDB command and LLM call
+4. **Monitor metrics**: Check `/metrics` regularly for repair success rates and LLM latencies
+5. **Test before deploy**: Always run `pytest tests/ -v`
+6. **No PostgreSQL**: This app uses **MongoDB only** — no SQL migrations needed
+7. **MongoDB auto-indexes**: Indexes (TTL, search, unique) are created on every startup
+8. **Celery is optional**: The engine runs synchronously without Redis/Celery configured
+9. **Keep secrets safe**: Never commit `.env` files; use a secrets manager in production
+10. **Health deep check**: Use `/health/deep` to verify LLM connectivity end-to-end
 
 ---
 
 ## Success Indicators ✓
 
 - [ ] API responds to requests
-- [ ] Health checks pass
-- [ ] Metrics are being collected
-- [ ] Repairs are succeeding (status=success in response)
-- [ ] Database is persisting data
-- [ ] Workers are processing tasks
-- [ ] Logs are being captured
+- [ ] `/health/ready` returns `{"status": "ready"}`
+- [ ] Metrics collecting at `/metrics`
+- [ ] Repairs returning `status=success` in response
+- [ ] MongoDB persisting `repair_records`
+- [ ] Logs readable in chosen format (`PRETTY` / `CONSOLE` / `JSON`)
 - [ ] No errors in monitoring tools
 
 ---
 
-**Everything working? Great! You're ready to use the Repair Engine! 🚀**
+**Everything working? Great! You're ready to use the Playwright Step Repair Engine! 🚀**
 
-For detailed information, refer to the full documentation:
-- README.md (Overview)
-- ARCHITECTURE.md (Design)
-- API.md (Integration)
-- DEPLOYMENT.md (Operations)
+For full details, refer to `README.md`.

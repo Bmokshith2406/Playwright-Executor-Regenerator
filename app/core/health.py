@@ -18,6 +18,7 @@ from enum import Enum
 from datetime import datetime, UTC
 
 from app.core.config import get_settings
+from app.core.prompts import HEALTHCHECK_LLM_PING_PROMPT
 
 logger = logging.getLogger("health")
 
@@ -177,8 +178,12 @@ class HealthChecker:
                 message="Startup complete",
             )
         
-        # Check LLM connectivity
-        checks["llm"] = await self._check_llm_connectivity()
+        # Configuration gates needed to serve traffic
+        checks["api_key"] = self._check_api_key()
+
+        # External dependencies used by request handling
+        checks["database"] = await self._check_database()
+        checks["redis"] = await self._check_redis()
         
         # Check disk space
         checks["disk"] = self._check_disk_space()
@@ -428,8 +433,8 @@ class HealthChecker:
                     None,
                     lambda: client.models.generate_content(
                         model=settings.LLM_MODEL_NAME,
-                        contents="test",
-                        config={"max_output_tokens": 10000},
+                        contents=HEALTHCHECK_LLM_PING_PROMPT,
+                        config={"max_output_tokens": 1},
                     ),
                 ),
                 timeout=10.0,
@@ -479,7 +484,7 @@ class HealthChecker:
             
             client = redis.from_url(settings.REDIS_URL)
             await client.ping()
-            await client.close()
+            await client.aclose()
             
             latency_ms = (time.perf_counter() - start) * 1000
             
@@ -520,6 +525,15 @@ class HealthChecker:
             from app.core.database import get_database
             db = get_database()
             await db.initialize()
+            if db.storage_mode == "in-memory-fallback":
+                latency_ms = (time.perf_counter() - start) * 1000
+                return HealthCheckResult(
+                    name="database",
+                    status=HealthStatus.UNHEALTHY,
+                    message="MongoDB unavailable; repository is running on in-memory fallback",
+                    latency_ms=latency_ms,
+                    details={"storage_mode": db.storage_mode, "error": db.last_error},
+                )
             if db._client:
                 await db._client.admin.command('ping')
                 latency_ms = (time.perf_counter() - start) * 1000
@@ -528,12 +542,14 @@ class HealthChecker:
                     status=HealthStatus.HEALTHY,
                     message="MongoDB connected",
                     latency_ms=latency_ms,
+                    details={"storage_mode": db.storage_mode},
                 )
             else:
                 return HealthCheckResult(
                     name="database",
                     status=HealthStatus.UNHEALTHY,
                     message="MongoDB client not initialized",
+                    details={"storage_mode": db.storage_mode},
                 )
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000

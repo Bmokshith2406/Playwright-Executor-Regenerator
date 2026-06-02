@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import logging
 from pathlib import Path
@@ -21,6 +22,7 @@ class ScriptPatcher:
     - Idempotent across repeated patches
     - Creates immutable backups
     """
+    LOG_PREVIEW_CHARS = 500
 
     # ==================================================
     # PUBLIC API
@@ -84,12 +86,10 @@ class ScriptPatcher:
             )
             return
 
-        logger.info(
-            "REGENERATED STEP BODY (PRE-PATCH) | step=%s\n"
-            "----- BEGIN REGENERATED CODE -----\n%s\n"
-            "----- END REGENERATED CODE -----",
+        logger.debug(
+            "REGENERATED STEP BODY (PRE-PATCH) | step=%s | preview=%r",
             resolved_name,
-            new_step_body,
+            self._preview_text(new_step_body),
         )
 
         patched_body = self._format_body(
@@ -103,8 +103,11 @@ class ScriptPatcher:
             backup_path = self._write_backup(script_path, source)
             logger.info("SCRIPT BACKUP CREATED | path=%s", backup_path)
 
+        patched_source = source[:start] + patched_body + source[end:]
+        patched_source = self._patch_guarded_step_arg(patched_source, resolved_name, new_step_body)
+
         script_path.write_text(
-            source[:start] + patched_body + source[end:],
+            patched_source,
             encoding="utf-8",
         )
 
@@ -260,6 +263,12 @@ class ScriptPatcher:
     def _hash(content: str) -> str:
         return hashlib.sha256(content.encode()).hexdigest()[:12]
 
+    def _preview_text(self, text: str) -> str:
+        compact = text.strip().replace("\r", "\\r").replace("\n", "\\n")
+        if len(compact) <= self.LOG_PREVIEW_CHARS:
+            return compact
+        return compact[: self.LOG_PREVIEW_CHARS] + "...<truncated>"
+
     @staticmethod
     def _write_backup(script_path: Path, content: str) -> Path:
         digest = hashlib.sha256(content.encode()).hexdigest()[:8]
@@ -269,3 +278,87 @@ class ScriptPatcher:
         )
         backup_path.write_text(content, encoding="utf-8")
         return backup_path
+
+    def _patch_guarded_step_arg(
+        self, source: str, step_function_name: str, new_step_body: str
+    ) -> str:
+        """
+        Locates the `_guarded_step` calls in the source that execute `step_function_name`,
+        and replaces their step code argument (positional or keyword) with the new body.
+        Supports multiple calls and positional/keyword arguments robustly.
+        """
+        try:
+            tree = ast.parse(source)
+            targets = []
+            
+            class CallFinder(ast.NodeVisitor):
+                def visit_Call(self, node: ast.Call):
+                    if isinstance(node.func, ast.Name) and node.func.id == "_guarded_step":
+                        # Resolve step_fn node (positional or keyword)
+                        step_fn_node = None
+                        if len(node.args) > 1:
+                            step_fn_node = node.args[1]
+                        else:
+                            for kw in node.keywords:
+                                if kw.arg == "step_fn":
+                                    step_fn_node = kw.value
+                                    break
+                        
+                        if step_fn_node and isinstance(step_fn_node, ast.Name) and step_fn_node.id == step_function_name:
+                            # Resolve step_code node (positional or keyword)
+                            step_code_node = None
+                            if len(node.args) > 4:
+                                step_code_node = node.args[4]
+                            else:
+                                for kw in node.keywords:
+                                    if kw.arg == "step_code":
+                                        step_code_node = kw.value
+                                        break
+                                        
+                            if step_code_node:
+                                targets.append(step_code_node)
+                                
+                    self.generic_visit(node)
+                    
+            finder = CallFinder()
+            finder.visit(tree)
+            
+            if not targets:
+                logger.warning(
+                    "SCRIPT PATCH | _guarded_step call argument for %s not found",
+                    step_function_name,
+                )
+                return source
+
+            lines = source.splitlines(keepends=True)
+            
+            # Resolve character ranges for each target node
+            ranges = []
+            for node in targets:
+                start_line = node.lineno - 1
+                start_col = node.col_offset
+                end_line = node.end_lineno - 1
+                end_col = node.end_col_offset
+                
+                start_idx = sum(len(lines[i]) for i in range(start_line)) + start_col
+                end_idx = sum(len(lines[i]) for i in range(end_line)) + end_col
+                ranges.append((start_idx, end_idx))
+                
+            # Sort ranges by start_idx descending so we can patch backwards
+            # without shifting subsequent character offsets
+            ranges.sort(key=lambda r: r[0], reverse=True)
+            
+            formatted_value = repr(new_step_body)
+            patched_source = source
+            for start_idx, end_idx in ranges:
+                patched_source = patched_source[:start_idx] + formatted_value + patched_source[end_idx:]
+                
+            return patched_source
+            
+        except Exception as exc:
+            logger.error(
+                "SCRIPT PATCH | Failed to patch _guarded_step argument for %s: %s",
+                step_function_name,
+                exc,
+            )
+            return source

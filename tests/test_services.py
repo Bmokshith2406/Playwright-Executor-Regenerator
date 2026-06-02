@@ -563,3 +563,44 @@ class TestFailureFingerprint:
         )
         
         assert fp1 != fp2
+
+
+class TestScriptPatcher:
+    """Tests for ScriptPatcher with call argument patching."""
+
+    def test_patch_step_and_guarded_step_argument(self, tmp_path):
+        from app.services.script_patcher import ScriptPatcher
+        
+        script_content = """# -*- coding: utf-8 -*-
+import asyncio
+
+async def _step_2_e35ecbfe67d3(page):
+    await page.wait_for_selector("input[name='usernameee']", timeout=10000)
+    await target.fill('john')
+
+async def test_flow():
+    # Execute steps
+    await _guarded_step(page, _step_2_e35ecbfe67d3, '2__step_2_e35ecbfe67d3', 2, "await page.wait_for_selector(\\\"input[name='usernameee']\\\", timeout=10000)\\nawait target.fill('john')", "Enter username.", 1)
+"""
+        script_file = tmp_path / "test_script.py"
+        script_file.write_text(script_content, encoding="utf-8")
+        
+        patcher = ScriptPatcher()
+        new_body = "    await page.locator('#username').fill('admin')"
+        
+        patcher.patch_step(
+            script_path=str(script_file),
+            step_function_name="_step_2_e35ecbfe67d3",
+            new_step_body=new_body,
+            backup=False,
+        )
+        
+        updated_content = script_file.read_text(encoding="utf-8")
+        
+        # Verify function body is updated
+        assert 'await page.locator(\'#username\').fill(\'admin\')' in updated_content
+        # Verify function body old lines are gone
+        assert 'await page.wait_for_selector("input[name=\'usernameee\']", timeout=10000)' not in updated_content
+        
+        # Verify the 5th argument of the _guarded_step call is patched
+        assert "await _guarded_step(page, _step_2_e35ecbfe67d3, '2__step_2_e35ecbfe67d3', 2, \"    await page.locator('#username').fill('admin')\"" in updated_content

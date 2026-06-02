@@ -10,6 +10,7 @@ Features:
 """
 
 from functools import lru_cache
+from types import SimpleNamespace
 from typing import Literal, Optional, List
 from dotenv import load_dotenv
 
@@ -148,7 +149,7 @@ class Settings(BaseSettings):
         description="Enable self-healing execution"
     )
     ENABLE_API_AUTH: bool = Field(
-        default=False,
+        default=True,
         description="Enable API key authentication"
     )
     ENABLE_RATE_LIMITING: bool = Field(
@@ -168,7 +169,7 @@ class Settings(BaseSettings):
         description="Dry run mode - no actual repairs"
     )
     ENABLE_SANDBOX_EXECUTION: bool = Field(
-        default=False,
+        default=True,
         description="Enable sandboxed Python execution"
     )
     SANDBOX_ENABLED: bool = Field(
@@ -186,6 +187,10 @@ class Settings(BaseSettings):
     SANDBOX_DOCKER_IMAGE: str = Field(
         default="python:3.11-slim",
         description="Docker image to use for python sandbox"
+    )
+    ALLOW_UNSAFE_HOST_EXECUTION_IN_PRODUCTION: bool = Field(
+        default=False,
+        description="Allow host subprocess execution in production when Docker sandboxing is unavailable"
     )
 
     # -------------------------
@@ -233,6 +238,10 @@ class Settings(BaseSettings):
         description="MongoDB database name"
     )
     DATABASE_ECHO: bool = Field(default=False)
+    ALLOW_INMEMORY_DATABASE_FALLBACK: bool = Field(
+        default=False,
+        description="Allow falling back to the in-memory repository when MongoDB is configured but unavailable"
+    )
 
 
     # -------------------------
@@ -258,6 +267,9 @@ class Settings(BaseSettings):
         description="Celery result backend URL"
     )
     CELERY_TASK_TIMEOUT: int = Field(default=300, ge=60, le=3600)
+    CELERY_TASK_SOFT_TIMEOUT: int = Field(default=270, ge=30, le=3600)
+    CELERY_WORKER_PREFETCH_MULTIPLIER: int = Field(default=1, ge=1, le=100)
+    CELERY_WORKER_CONCURRENCY: int = Field(default=4, ge=1, le=100)
 
     # -------------------------
     # Executor Configuration
@@ -295,6 +307,31 @@ class Settings(BaseSettings):
             keys.insert(0, self.GOOGLE_API_KEY)
         return keys
 
+    @property
+    def redis(self):
+        """Compatibility view for legacy modules that expect nested Redis settings."""
+        return SimpleNamespace(
+            enabled=bool(self.REDIS_URL),
+            url=self.REDIS_URL,
+            max_connections=self.REDIS_MAX_CONNECTIONS,
+            key_prefix=self.REDIS_KEY_PREFIX,
+        )
+
+    @property
+    def celery(self):
+        """Compatibility view for legacy modules that expect nested Celery settings."""
+        return SimpleNamespace(
+            broker_url=self.CELERY_BROKER_URL,
+            result_backend=self.CELERY_RESULT_BACKEND,
+            task_time_limit=self.CELERY_TASK_TIMEOUT,
+            task_soft_time_limit=min(
+                self.CELERY_TASK_SOFT_TIMEOUT,
+                self.CELERY_TASK_TIMEOUT,
+            ),
+            worker_prefetch_multiplier=self.CELERY_WORKER_PREFETCH_MULTIPLIER,
+            worker_concurrency=self.CELERY_WORKER_CONCURRENCY,
+        )
+
     # --------------------------------------------------
     # Validators
     # --------------------------------------------------
@@ -324,6 +361,13 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_production_settings(self):
         """Enforce stricter validation in production."""
+        supported_image_types = {"image/png", "image/jpeg", "image/webp"}
+        unsupported_mime_types = set(self.ALLOWED_SCREENSHOT_MIME_TYPES) - supported_image_types
+        if unsupported_mime_types:
+            raise ValueError(
+                f"Unsupported screenshot MIME types configured: {sorted(unsupported_mime_types)}"
+            )
+
         if self.is_production:
             # Require API authentication in production
             if not self.API_SECRET_KEY and not self.ALLOWED_API_KEYS:
@@ -341,6 +385,19 @@ class Settings(BaseSettings):
             if not self.effective_api_keys:
                 raise ValueError(
                     "At least one Google API key required in production"
+                )
+
+            if not self.ENABLE_SANDBOX_EXECUTION:
+                raise ValueError(
+                    "Sandboxed execution must be enabled in production"
+                )
+
+            if (
+                not self.SANDBOX_USE_DOCKER
+                and not self.ALLOW_UNSAFE_HOST_EXECUTION_IN_PRODUCTION
+            ):
+                raise ValueError(
+                    "Production executor requires Docker sandboxing or an explicit host-execution override"
                 )
         
         return self

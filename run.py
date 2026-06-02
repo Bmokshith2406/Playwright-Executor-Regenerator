@@ -14,8 +14,18 @@ Recommended for actual executor runs:
 """
 
 import os
+import sys
 import argparse
-import uvicorn
+
+# Check if uvicorn is installed in the current Python environment
+try:
+    import uvicorn
+except ImportError:
+    print("❌ Error: 'uvicorn' is not installed in the active Python environment.")
+    print("👉 Did you forget to activate the virtual environment?")
+    print("   Run: .\\venv\\Scripts\\activate")
+    print("   Then try running the command again.")
+    sys.exit(1)
 
 
 def main():
@@ -32,8 +42,8 @@ def main():
 
     parser.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="The interface address to bind the server to",
+        default="127.0.0.1",
+        help="The interface address to bind the server to (default: 127.0.0.1 for local compatibility)",
     )
 
     parser.add_argument(
@@ -74,6 +84,9 @@ def main():
     print(f"📡 Address: {cyan}http://{args.host}:{args.port}{reset}")
     print(f"🎨 Log Formatting Mode: {bold}{args.mode.upper()}{reset}")
     print(f"🔁 Auto Reload: {bold}{'ON' if reload_enabled else 'OFF'}{reset}")
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    app_dir = os.path.join(current_dir, "app")
 
     if reload_enabled:
         print(
@@ -120,7 +133,7 @@ def main():
             host=args.host,
             port=args.port,
             reload=reload_enabled,
-            reload_dirs=["app"] if reload_enabled else None,
+            reload_dirs=[app_dir] if reload_enabled else None,
             reload_excludes=reload_excludes if reload_enabled else None,
             log_level=args.log_level.lower(),
         )

@@ -138,7 +138,7 @@ class TestRepairEndpoint:
         assert response.status_code == 413
     
     def test_repair_invalid_image_type(self, client: TestClient, sample_repair_request):
-        """Test repair endpoint rejects disallowed image types."""
+        """Test repair endpoint rejects invalid image payloads."""
         payload = sample_repair_request.model_dump_json()
         
         response = client.post(
@@ -148,10 +148,10 @@ class TestRepairEndpoint:
         )
         
         assert response.status_code == 400
-        assert "Unsupported image type" in response.json()["detail"]
+        assert response.json()["detail"] == "Invalid image file"
     
     def test_repair_invalid_png_signature(self, client: TestClient, sample_repair_request, invalid_png_bytes):
-        """Test repair endpoint validates PNG signature."""
+        """Test repair endpoint validates binary image signatures."""
         payload = sample_repair_request.model_dump_json()
         
         response = client.post(
@@ -161,7 +161,7 @@ class TestRepairEndpoint:
         )
         
         assert response.status_code == 400
-        assert "Invalid PNG" in response.json()["detail"]
+        assert response.json()["detail"] == "Invalid image file"
     
     @patch("app.routes.repair._REPAIR_SERVICE.repair_step", new_callable=AsyncMock)
     def test_repair_success(self, mock_repair_step, client: TestClient, sample_repair_request):
@@ -210,6 +210,37 @@ class TestRepairEndpoint:
             files={"error_image": ("screenshot.png", valid_png_bytes, "image/png")},
         )
         
+        assert response.status_code == 200
+
+    @pytest.mark.parametrize(
+        ("filename", "content_type", "fixture_name"),
+        [
+            ("screenshot.jpg", "image/jpeg", "valid_jpeg_bytes"),
+            ("screenshot.webp", "image/webp", "valid_webp_bytes"),
+        ],
+    )
+    @patch("app.routes.repair._REPAIR_SERVICE.repair_step", new_callable=AsyncMock)
+    def test_repair_with_supported_non_png_images(
+        self,
+        mock_repair_step,
+        client: TestClient,
+        sample_repair_request,
+        request,
+        filename: str,
+        content_type: str,
+        fixture_name: str,
+    ):
+        """Test repair accepts JPEG and WebP screenshots."""
+        mock_repair_step.return_value = ('await page.click("button")', "click")
+        image_bytes = request.getfixturevalue(fixture_name)
+        payload = sample_repair_request.model_dump_json()
+
+        response = client.post(
+            "/repair",
+            data={"payload": payload},
+            files={"error_image": (filename, image_bytes, content_type)},
+        )
+
         assert response.status_code == 200
 
 

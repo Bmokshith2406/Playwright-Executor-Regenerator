@@ -59,18 +59,19 @@ class RepairService:
                 request_id,
                 request.step_id,
             )
+            start = asyncio.get_running_loop().time()
+            outcome = "error"
 
             try:
-                with self.metrics.repair_duration_seconds.time(outcome="pending"):
-
-                    result = await asyncio.wait_for(
-                        self.pipeline_fn(
-                            request=deepcopy(request),
-                            error_image_bytes=error_image_bytes,
-                            request_id=request_id,
-                        ),
-                        timeout=self.timeout_seconds,
-                    )
+                result = await asyncio.wait_for(
+                    self.pipeline_fn(
+                        request=deepcopy(request),
+                        error_image_bytes=error_image_bytes,
+                        request_id=request_id,
+                    ),
+                    timeout=self.timeout_seconds,
+                )
+                outcome = "success"
 
                 logger.debug(
                     "REPAIR_SERVICE_SUCCESS | request_id=%s | step_id=%s",
@@ -81,6 +82,7 @@ class RepairService:
                 return result
 
             except asyncio.TimeoutError:
+                outcome = "timeout"
                 logger.error(
                     "REPAIR_SERVICE_TIMEOUT | request_id=%s | step_id=%s | timeout=%s",
                     request_id,
@@ -90,6 +92,7 @@ class RepairService:
                 raise
 
             except StepNotRepairableError:
+                outcome = "not_repairable"
                 logger.info(
                     "REPAIR_SERVICE_NOT_REPAIRABLE | request_id=%s | step_id=%s",
                     request_id,
@@ -104,3 +107,8 @@ class RepairService:
                     request.step_id,
                 )
                 raise
+            finally:
+                self.metrics.repair_duration_seconds.observe(
+                    asyncio.get_running_loop().time() - start,
+                    outcome=outcome,
+                )

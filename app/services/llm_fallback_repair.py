@@ -5,6 +5,10 @@ from typing import Optional
 
 from app.core.llm_executor import LLMExecutor
 from app.core.dom_pruner import DomPruner
+from app.core.prompts import (
+    build_fallback_repair_prompt,
+    build_fallback_structure_retry_prompt,
+)
 
 logger = logging.getLogger("llm.fallback.repair")
 
@@ -18,9 +22,10 @@ class LLMFallbackRepairEngine:
         self.llm = LLMExecutor.get_instance()
         
     # maximum total chars to include from DOM in prompts
-    DOM_SNIPPET_MAX_CHARS = 1200
+    DOM_SNIPPET_MAX_CHARS = 900
     # how many characters around each match to include
     DOM_SNIPPET_WINDOW = 400
+    LOG_PREVIEW_CHARS = 500
 
     def _extract_relevant_tokens_from_code(self, code: str) -> list[str]:
         """
@@ -102,36 +107,36 @@ class LLMFallbackRepairEngine:
             logger.error("FALLBACK LLM HARD FAILURE | err=%s", exc)
             return None
 
-        # 🔍 LOG RAW OUTPUT
-        logger.info("========== FALLBACK RAW OUTPUT START ==========")
-        logger.info(raw)
-        logger.info("=========== FALLBACK RAW OUTPUT END ==========")
-
         if not raw:
             logger.error("FALLBACK LLM RETURNED EMPTY")
             return None
 
-        code = self._normalize_output(raw)
+        logger.debug(
+            "FALLBACK RAW OUTPUT | preview=%r",
+            self._preview_text(raw),
+        )
 
-        # 🔍 LOG NORMALIZED OUTPUT
-        logger.info("====== FALLBACK NORMALIZED OUTPUT START ======")
-        logger.info(code)
-        logger.info("======= FALLBACK NORMALIZED OUTPUT END =======")
+        code = self._normalize_output(raw)
 
         if not code:
             logger.error("FALLBACK NORMALIZATION FAILED")
             return None
 
-        code = self._extract_body_only(code)
+        logger.debug(
+            "FALLBACK NORMALIZED OUTPUT | preview=%r",
+            self._preview_text(code),
+        )
 
-        # 🔍 LOG BODY EXTRACTION
-        logger.info("====== FALLBACK BODY OUTPUT START ======")
-        logger.info(code)
-        logger.info("======= FALLBACK BODY OUTPUT END =======")
+        code = self._extract_body_only(code)
 
         if not code:
             logger.error("FALLBACK LLM OUTPUT NOT BODY-ONLY")
             return None
+
+        logger.debug(
+            "FALLBACK BODY OUTPUT | preview=%r",
+            self._preview_text(code),
+        )
 
         # 🔒 STRUCTURE ENFORCEMENT WITH AUTO-REPROMPT
         if self._violates_structure(current_code, code):
@@ -195,6 +200,14 @@ class LLMFallbackRepairEngine:
 
         return None
 
+    def _preview_text(self, text: Optional[str]) -> str:
+        if not text:
+            return ""
+        compact = text.strip().replace("\r", "\\r").replace("\n", "\\n")
+        if len(compact) <= self.LOG_PREVIEW_CHARS:
+            return compact
+        return compact[: self.LOG_PREVIEW_CHARS] + "...<truncated>"
+
     def _add_visibility_wait(self, code: str) -> Optional[str]:
         if "expect(" in code:
             return None
@@ -234,78 +247,18 @@ class LLMFallbackRepairEngine:
             keyword = tokens[0] if tokens else None
 
         pruned_dom = DomPruner.prune(dom_snapshot, keyword)
-        dom_block = pruned_dom if pruned_dom else "N/A"
+        dom_block = (
+            pruned_dom[: self.DOM_SNIPPET_MAX_CHARS]
+            if pruned_dom
+            else "N/A"
+        )
 
-        # Updated prompt: Enforce preservation of runtime data literals dynamically.
-        return f"""
-    You are an expert Playwright test automation engineer.
-
-    You MUST return ONLY the function body.
-    NOT the function definition.
-    NOT explanations.
-    NOT markdown.
-    NOT comments.
-    NOT imports.
-
-
-CRITICAL STRUCTURE RULES (MANDATORY):
-- You MUST preserve the overall structure of the existing code.
-- You MAY change locators, waits, and interaction methods.
-- You MUST keep the same variable flow and shape (e.g., locator → target → wait → action).
-- Do NOT collapse multiple steps into one unless unavoidable.
-- Do NOT introduce a completely different style unless the current one is invalid.
-- If the current code uses intermediate variables, KEEP them.
-- If the current code uses explicit waits, KEEP them (but you may modify them).
-- NEVER change any USERNAME, PASSWORD, credential variables, or hardcoded authentication values if explicitly present in the code or step intent.
-
-DATA INTEGRITY RULE (MANDATORY — DYNAMIC, NOT HARDCODED):
-- DO NOT change any runtime data literals. "Runtime data literals" include string, numeric, or boolean literals that materially affect runtime behavior, such as:
-  * arguments passed to user-input functions (e.g., .fill('john'), .type(\"abc\"))
-  * values assigned to variables used as inputs (e.g., username = 'john')
-  * expected values used in assertions (e.g., expect(el).to_have_text(\"Done\"))
-  * navigation URLs passed to page.goto("https://...")
-  * option values passed to select/choose, cookie/header literal values, or JSON payload literals
-- "Locators / selectors" (e.g., "input[name='usernamee']", CSS/XPath) ARE NOT runtime data literals and MAY be changed to fix selection issues.
-- Allowed minor edits to literals: changing single ↔ double quotes, whitespace differences. Any content change (character, digit, or word) is prohibited.
-
-HOW TO COMPLY (dynamic algorithm — implement by extraction/comparison):
-1. Prefer authoritative source for literals:
-   - If the current code contains literals used at runtime, treat those as authoritative.
-   - If the step_intent explicitly provides values, treat those as authoritative.
-   - If there is an earlier failed attempt and it contains literals, prefer the most recent authoritative attempt.
-2. Extract runtime literals and their *semantic roles* (e.g., fill-argument for username, value for expect assertion, page.goto target).
-3. In your repaired code, preserve the exact literal content for every authoritative runtime literal when used in the same semantic role.
-   - Replacing a literal with a variable is allowed only if that variable is assigned the identical literal value within the same function body.
-4. If preserving the literal exactly would prevent a working repair (e.g., a locator must change), prioritize changing locators/waits rather than changing the literal content.
-5. If a literal appears in multiple roles, preserve it in all roles.
-6. If you are uncertain whether a particular token is a runtime literal or a non-runtime label, treat it as a runtime literal and preserve it (explainability is not allowed in the response body — but the repair must keep the literal).
-
-OTHER RULES:
-- Preserve original intent
-- Preserve the structural pattern of the code
-- Fix only what is broken
-- Use Playwright best practices
-- Prefer role/text/label-based locators
-- Add or adjust waits only if needed
-- Handle dialogs or overlays if blocking
-- NEVER add assertions unless explicitly asked
-- NEVER remove variables unless required for correctness
-- DONT TOUCH ACTUAL VALUES IN THE CODE
-
-Step intent:
-{step_intent}
-
-Current step code:
-{current_code}
-
-Error logs:
-{error_text}
-
-DOM snapshot (pruned to relevant snippets if available):
-{dom_block}
-
-Return ONLY valid Python body code.
-""".strip()
+        return build_fallback_repair_prompt(
+            step_intent=step_intent,
+            current_code=current_code,
+            error_text=error_text,
+            dom_snapshot=dom_block,
+        )
 
     def _build_structure_violation_prompt(
         self,
@@ -314,35 +267,11 @@ Return ONLY valid Python body code.
         current_code: str,
         error_text: str,
     ) -> str:
-        # Retry prompt: insist on preserved structure and preserved runtime literals.
-        return f"""
-Your previous output VIOLATED the required code structure or changed runtime data.
-
-You MUST rewrite the code while STRICTLY preserving its structure AND preserving all runtime data literals.
-
-STRUCTURE RULES (MANDATORY):
-- Keep the same number of steps
-- Keep intermediate variables (e.g., locator, target)
-- Keep the same flow shape
-- Do NOT collapse into one-liners
-- Only fix what is broken
-
-DATA INTEGRITY RULE (MANDATORY):
-- Do NOT change any runtime data literals (string/number/boolean values that affect behavior).
-- You MAY change locators, waits, and interaction techniques, but the actual runtime literal values must remain identical (allowed minor changes: quotes, whitespace).
-- If you replace a literal with a variable, ensure the variable is assigned the exact same literal value in the function body.
-
-Step intent:
-{step_intent}
-
-Current step code (structure to preserve):
-{current_code}
-
-Error logs:
-{error_text}
-
-Return ONLY the corrected Python function body.
-""".strip()
+        return build_fallback_structure_retry_prompt(
+            step_intent=step_intent,
+            current_code=current_code,
+            error_text=error_text,
+        )
 
     # ==================================================
     # OUTPUT NORMALIZATION

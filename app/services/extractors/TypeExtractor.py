@@ -3,6 +3,8 @@ import logging
 import re
 
 from app.core.llm_executor import LLMExecutor
+from app.core.dom_pruner import DomPruner
+from app.core.prompts import build_type_extractor_prompt
 from app.models.extraction import ExtractedLocator, ExtractedValue
 from app.models.cir import LocatorStrategy
 from app.services.extractors.BaseExtractor import BaseExtractor
@@ -15,7 +17,7 @@ class TypeActionExtractor(BaseExtractor):
     TYPE action evidence extractor for STEP REPAIR.
     """
 
-    MAX_DOM_CHARS = 100
+    MAX_DOM_CHARS = 700
 
     async def extract(
         self,
@@ -63,21 +65,21 @@ class TypeActionExtractor(BaseExtractor):
         error_image_bytes: Optional[bytes],
     ) -> Optional[str]:
 
-        prompt = f"""Analyze FAILED Playwright TYPE step.
-Identify target field and value kind. No CSS/XPath. No invented literals.
+        keyword = self._extract_quoted(step_intent)
+        if not keyword:
+            keyword = self._extract_quoted(original_code)
 
-Reply ONLY one of:
-- none
-- type:label("<label_text>") value("<kind>")
-- type:placeholder("<placeholder_text>") value("<kind>")
-- type:role(textbox, name="<name>") value("<kind>")
+        pruned_dom = DomPruner.prune(dom_snapshot, keyword)
+        if pruned_dom:
+            pruned_dom = pruned_dom[: self.MAX_DOM_CHARS]
+        self._last_dom_snapshot = pruned_dom or ""
 
-Where <kind> is: email, username, password, text, or number.
-
-Intent: {step_intent}
-Code: {original_code}
-Error: {error_message}
-DOM: {(dom_snapshot[:self.MAX_DOM_CHARS] if dom_snapshot else "N/A")}"""
+        prompt = build_type_extractor_prompt(
+            step_intent=step_intent,
+            original_code=original_code,
+            error_message=error_message,
+            dom_snapshot=pruned_dom,
+        )
 
         executor = LLMExecutor.get_instance()
 

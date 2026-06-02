@@ -32,7 +32,7 @@ class SandboxedPythonExecutor:
         self.timeout_seconds = timeout_seconds
         self.max_memory_mb = max_memory_mb
         self.use_docker = use_docker and settings.SANDBOX_USE_DOCKER
-        self.validator = ScriptSecurityValidator(strict_mode=strict_validation)
+        self.validator = ScriptSecurityValidator(strict_mode=strict_validation or settings.ENABLE_SANDBOX_EXECUTION)
     
     async def execute_sandboxed(
         self,
@@ -348,7 +348,7 @@ class AsyncPythonExecutor(BaseExecutor):
         self.base_work_dir = Path(base_work_dir or os.getcwd())
         self.base_env = env or {}
         self.enable_sandbox = enable_sandbox
-        self.validator = ScriptSecurityValidator()
+        self.validator = ScriptSecurityValidator(strict_mode=enable_sandbox)
 
     async def execute(
         self,
@@ -364,9 +364,14 @@ class AsyncPythonExecutor(BaseExecutor):
         run_id = uuid.uuid4().hex[:8]
         run_dir = self.base_work_dir / "runs" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
+        artifacts_root = run_dir / "artifacts"
+        artifacts_root.mkdir(parents=True, exist_ok=True)
+
+        script_content = script.read_text(encoding="utf-8")
+        staged_script = run_dir / script.name
+        staged_script.write_text(script_content, encoding="utf-8")
 
         if self.enable_sandbox and settings.ENABLE_SANDBOX_EXECUTION:
-            script_content = script.read_text(encoding="utf-8")
             is_valid, error_msg = self.validator.validate(script_content)
             if not is_valid:
                 logger.warning(f"Script validation failed: {error_msg}")
@@ -387,27 +392,58 @@ class AsyncPythonExecutor(BaseExecutor):
                     error=f"Security validation failed: {error_msg}",
                 )
 
-        cmd = [self.python_binary, str(script)]
-        if args:
-            cmd.extend(args)
-
         env = os.environ.copy()
         env.update(self.base_env)
         if extra_env:
             env.update(extra_env)
 
         env["RUN_ID"] = run_id
-
-        artifacts_root = run_dir / "artifacts"
-        artifacts_root.mkdir(parents=True, exist_ok=True)
         env["ARTIFACTS_DIR"] = str(artifacts_root)
+        env = self._strip_sensitive_env(env)
+
+        if (
+            settings.is_production
+            and settings.ENABLE_SANDBOX_EXECUTION
+            and not settings.SANDBOX_USE_DOCKER
+            and not settings.ALLOW_UNSAFE_HOST_EXECUTION_IN_PRODUCTION
+        ):
+            return ExecutionResult(
+                success=False,
+                exit_code=-1,
+                stdout="",
+                stderr="Host execution is disabled in production without Docker sandboxing",
+                duration_ms=0,
+                timed_out=False,
+                command=[],
+                working_dir=str(run_dir),
+                artifacts_dir=str(artifacts_root),
+                script_path=str(script),
+                run_id=run_id,
+                semantic_status="failed",
+                outcome=ExecutionOutcome.SANDBOX_VIOLATION,
+                error="Host execution is disabled in production without Docker sandboxing",
+            )
+
+        if settings.ENABLE_SANDBOX_EXECUTION and settings.SANDBOX_USE_DOCKER:
+            cmd = self._build_docker_cmd(
+                run_dir=run_dir,
+                script_name=staged_script.name,
+                run_id=run_id,
+                env=env,
+            )
+            subprocess_env = os.environ.copy()
+        else:
+            cmd = [self.python_binary, str(staged_script)]
+            if args:
+                cmd.extend(args)
+            subprocess_env = env
 
         try:
             result = await asyncio.to_thread(
                 self._run_subprocess,
                 cmd=cmd,
                 cwd=str(run_dir),
-                env=env,
+                env=subprocess_env,
                 timeout=self.timeout_seconds,
             )
 
@@ -515,6 +551,67 @@ class AsyncPythonExecutor(BaseExecutor):
             # Prevent console window popup on Windows
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         return subprocess.run(cmd, **kwargs)
+
+    @staticmethod
+    def _strip_sensitive_env(env: Dict[str, str]) -> Dict[str, str]:
+        stripped = dict(env)
+        sensitive_vars = {
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "GOOGLE_API_KEY",
+            "GOOGLE_API_KEYS",
+            "OPENAI_API_KEY",
+            "API_SECRET_KEY",
+            "ALLOWED_API_KEYS",
+            "MONGODB_URL",
+            "REDIS_URL",
+            "CELERY_BROKER_URL",
+            "CELERY_RESULT_BACKEND",
+        }
+        for var in sensitive_vars:
+            stripped.pop(var, None)
+
+        stripped["PYTHONDONTWRITEBYTECODE"] = "1"
+        stripped["PYTHONUNBUFFERED"] = "1"
+        return stripped
+
+    def _build_docker_cmd(
+        self,
+        *,
+        run_dir: Path,
+        script_name: str,
+        run_id: str,
+        env: Dict[str, str],
+    ) -> List[str]:
+        cmd = [
+            "docker", "run",
+            "--rm",
+            "--network", "bridge" if settings.SANDBOX_ALLOW_NETWORK else "none",
+            "--memory", "512m",
+            "--cpus", "1",
+            "--read-only",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,size=100m",
+            "-v", f"{run_dir}:/workspace:rw",
+            "-w", "/workspace",
+            "-e", "ARTIFACTS_DIR=/workspace/artifacts",
+            "-e", f"RUN_ID={run_id}",
+            "--user", "nobody",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+        ]
+
+        allowed_env = {"RUN_ID", "ARTIFACTS_DIR"}
+        for key, value in env.items():
+            if key in allowed_env or key.startswith("PW_") or key.startswith("PLAYWRIGHT_"):
+                cmd.extend(["-e", f"{key}={value}"])
+
+        cmd.extend([
+            settings.SANDBOX_DOCKER_IMAGE,
+            "python",
+            f"/workspace/{script_name}",
+        ])
+        return cmd
 
     @staticmethod
     def _validate_script(script: Path):

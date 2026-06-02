@@ -302,7 +302,7 @@ class DistributedExecutionContext:
             return
         
         # Delete main key and all related keys
-        keys = await self._redis.keys(f"{self._key}*")
+        keys = [key async for key in self._redis.scan_iter(match=f"{self._key}*")]
         if keys:
             await self._redis.delete(*keys)
 
@@ -607,6 +607,6 @@ class FailureFingerprintCache:
             return
         
         # Get all related keys
-        keys = await self._redis.keys(f"{self.KEY_PREFIX}*")
+        keys = [key async for key in self._redis.scan_iter(match=f"{self.KEY_PREFIX}*")]
         if keys:
             await self._redis.delete(*keys)

@@ -4,6 +4,7 @@ from typing import Optional
 import re
 
 from app.core.llm_executor import LLMExecutor
+from app.core.prompts import build_action_classifier_prompt
 from app.models.cir import ActionType
 
 
@@ -118,42 +119,11 @@ class LLMActionClassifier:
         # LLM FALLBACK (AMBIGUOUS)
         # ---------------------------
 
-        prompt = f"""
-You are an expert Playwright test automation engineer.
-
-Your task is to decide what SINGLE action best represents
-the REAL cause of the following failed step.
-
-Step intent:
-{step_intent}
-
-Original code:
-{original_code}
-
-Failure type:
-{error_type}
-
-A screenshot MAY be provided.
-Use the image ONLY to detect dialogs, modals, popups,
-permission prompts, or blocking overlays.
-Do NOT extract text or locators from the image.
-
-Choose exactly ONE of:
-navigate, click, type, select, assert, dialog
-
-STRICT RULES:
-- Choose "assert" ONLY if the intent is explicitly a verification.
-- Examples of ASSERT intents:
-  "Verify that...", "Check that...", "Ensure that...",
-  "Confirm that...", "Validate that..."
-
-- If the intent involves clicking, typing, selecting, or navigating,
-  you MUST NOT choose "assert".
-
-- Prefer step intent unless a dialog blocks execution.
-- Output ONE word only.
-- NO explanations.
-""".strip()
+        prompt = build_action_classifier_prompt(
+            step_intent=step_intent,
+            original_code=original_code,
+            error_type=error_type,
+        )
 
         try:
             if error_image_bytes:

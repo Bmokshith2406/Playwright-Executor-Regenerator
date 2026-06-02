@@ -194,6 +194,32 @@ class TestCodeInjectionPrevention:
 
 class TestSandboxExecution:
     """Tests for sandboxed Python execution."""
+
+    def test_validator_blocks_process_and_filesystem_primitives(self):
+        """Test AST validator rejects dangerous host operations."""
+        from app.executors.sandbox import ScriptSecurityValidator
+
+        validator = ScriptSecurityValidator(strict_mode=True)
+        dangerous_scripts = [
+            "import os\nos.system('echo hi')",
+            "import subprocess\nsubprocess.run(['echo', 'hi'])",
+            "import shutil\nshutil.rmtree('tmp')",
+        ]
+
+        for script in dangerous_scripts:
+            is_safe, reason = validator.validate(script)
+            assert is_safe is False
+            assert reason
+
+    def test_validator_allows_basic_safe_script(self):
+        """Test AST validator still allows simple safe Python."""
+        from app.executors.sandbox import ScriptSecurityValidator
+
+        validator = ScriptSecurityValidator(strict_mode=True)
+        is_safe, reason = validator.validate("print('hello world')")
+
+        assert is_safe is True
+        assert reason == ""
     
     @pytest.mark.asyncio
     async def test_sandbox_blocks_file_access(self):

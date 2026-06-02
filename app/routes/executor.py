@@ -132,6 +132,17 @@ async def execute_python_file(
         script.filename,
     )
 
+    if not settings.ENABLE_SANDBOX_EXECUTION and not settings.is_development:
+        logger.error(
+            "EXEC_REJECTED | request_id=%s | reason=sandbox_disabled",
+            request_id,
+        )
+        metrics.script_executions_total.inc(status="rejected")
+        raise HTTPException(
+            status_code=503,
+            detail="Executor sandbox is disabled",
+        )
+
     # Validate file type
     if not script.filename or not script.filename.endswith(".py"):
         metrics.script_executions_total.inc(status="rejected")
@@ -142,7 +153,14 @@ async def execute_python_file(
 
     try:
         script_content = await script.read()
-        script_text = script_content.decode("utf-8")
+        try:
+            script_text = script_content.decode("utf-8")
+        except UnicodeDecodeError:
+            metrics.script_executions_total.inc(status="rejected")
+            raise HTTPException(
+                status_code=400,
+                detail="Script must be UTF-8 encoded text",
+            )
         script_hash = hashlib.sha256(script_content).hexdigest()[:12]
 
         # Sandbox validation (if enabled)
@@ -169,7 +187,7 @@ async def execute_python_file(
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             script_path = Path(tmp_dir) / script.filename
-            script_path.write_text(script_text)
+            script_path.write_text(script_text, encoding="utf-8")
 
             # --------------------------------------------------
             # SELF-HEALING EXECUTION
@@ -339,6 +357,9 @@ async def _save_execution_record(
         if isinstance(raw_meta, dict) and type(raw_meta).__name__ not in ('MagicMock', 'AsyncMock', 'Mock'):
             meta = raw_meta
 
+        repairs_attempted = int(meta.get("repairs_attempted", 0) or 0)
+        repairs_successful = int(meta.get("repairs_successful", 0) or 0)
+
         record = ExecutionRecord(
             run_id=run_id,
             script_path=script_path,
@@ -348,6 +369,8 @@ async def _save_execution_record(
             duration_ms=duration_ms,
             stdout=result.stdout[:10000] if result.stdout else None,  # Truncate
             stderr=result.stderr[:10000] if result.stderr else None,
+            repairs_attempted=repairs_attempted,
+            repairs_successful=repairs_successful,
             request_id=request_id,
             metadata=meta,
         )

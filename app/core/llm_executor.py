@@ -268,12 +268,12 @@ class LLMExecutor:
         retries: int,
     ) -> Optional[str]:
 
-        # HARD PNG VALIDATION
-        if not image_bytes or len(image_bytes) < 100:
+        if not image_bytes or len(image_bytes) < 12:
             raise ValueError("Invalid or empty image bytes")
 
-        if image_bytes[:8] != b"\x89PNG\r\n\x1a\n":
-            raise ValueError("Invalid PNG signature")
+        mime_type = self._detect_image_mime_type(image_bytes)
+        if not mime_type:
+            raise ValueError("Unsupported image format")
 
         max_tokens = self._get_max_tokens(role)
         metrics = get_metrics()
@@ -282,7 +282,7 @@ class LLMExecutor:
             for attempt in range(retries + 1):
                 try:
                     response = await self._generate_multimodal(
-                        prompt, image_bytes, max_tokens
+                        prompt, image_bytes, max_tokens, mime_type
                     )
                     self._log_usage(response, role, LLMMode.MULTIMODAL)
                     self._record_metrics(role, LLMMode.MULTIMODAL, "success", response)
@@ -304,7 +304,7 @@ class LLMExecutor:
                         self.model_name = "gemini-2.5-flash"
                         try:
                             response = await self._generate_multimodal(
-                                prompt, image_bytes, max_tokens
+                                prompt, image_bytes, max_tokens, mime_type
                             )
                             self._log_usage(response, role, LLMMode.MULTIMODAL)
                             self._record_metrics(role, LLMMode.MULTIMODAL, "success", response)
@@ -374,12 +374,13 @@ class LLMExecutor:
         prompt: str,
         image_bytes: bytes,
         max_tokens: int,
+        mime_type: str,
     ):
         contents = [
             prompt,
             Part.from_bytes(
                 data=image_bytes,
-                mime_type="image/png",
+                mime_type=mime_type,
             ),
         ]
 
@@ -395,6 +396,16 @@ class LLMExecutor:
             ),
             timeout=self.settings.LLM_TIMEOUT_SECONDS,
         )
+
+    @staticmethod
+    def _detect_image_mime_type(image_bytes: bytes) -> Optional[str]:
+        if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+            return "image/png"
+        if image_bytes[:3] == b"\xff\xd8\xff":
+            return "image/jpeg"
+        if len(image_bytes) >= 12 and image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+            return "image/webp"
+        return None
 
     # ==================================================
     # HELPERS

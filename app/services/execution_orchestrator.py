@@ -75,15 +75,27 @@ class SelfHealingExecutorOrchestrator:
         self.patcher = patcher
         self.config = config
         
-        self.fallback_repair = LLMFallbackRepairEngine()
         self.circuit_breaker = CircuitBreaker()
         self.backoff = BackoffPolicy()
-        self.explainer = RepairExplanationService()
         self.rollback_manager = RollbackManager()
+        self._fallback_repair: Optional[LLMFallbackRepairEngine] = None
+        self._explainer: Optional[RepairExplanationService] = None
 
     # ==================================================
     # PUBLIC API
     # ==================================================
+
+    @property
+    def fallback_repair(self) -> LLMFallbackRepairEngine:
+        if self._fallback_repair is None:
+            self._fallback_repair = LLMFallbackRepairEngine()
+        return self._fallback_repair
+
+    @property
+    def explainer(self) -> RepairExplanationService:
+        if self._explainer is None:
+            self._explainer = RepairExplanationService()
+        return self._explainer
 
     async def execute_script_with_self_healing(self, *, script_path: str):
         ctx = ExecutionContext()
@@ -112,14 +124,14 @@ class SelfHealingExecutorOrchestrator:
 
             if status is None:
                 logger.error("STATUS_RESOLUTION_FAILED_FATAL")
-                return self._with_semantic_status(result, "failed")
+                return self._finalize_result(result, ctx, "failed")
             
             if status == "running":
                 ctx.running_retries += 1
 
                 if ctx.running_retries > self.config.max_running_retries:
                     logger.error("RUNNING_STATUS_STUCK_ABORTING")
-                    return self._with_semantic_status(result, "failed")
+                    return self._finalize_result(result, ctx, "failed")
 
                 logger.info("STATUS_RUNNING_REEXECUTING", extra={"iteration": iteration})
                 await asyncio.sleep(1)
@@ -138,19 +150,20 @@ class SelfHealingExecutorOrchestrator:
                         final_status="passed",
                         ctx=ctx,
                     )
-                return self._with_semantic_status(result, "passed")
+                return self._finalize_result(result, ctx, "passed")
 
             # ----------------------------
             # FAILED → TRY REPAIR
             # ----------------------------
 
-            repair_request = self.repair_trigger.build_request_from_artifacts(
-                result.artifacts_dir
+            repair_request = await asyncio.to_thread(
+                self.repair_trigger.build_request_from_artifacts,
+                result.artifacts_dir,
             )
 
             if not repair_request:
                 logger.error("NO_REPAIR_REQUEST_STOPPING")
-                return self._with_semantic_status(result, "failed")
+                return self._finalize_result(result, ctx, "failed")
 
             step_id = repair_request.step_id
             attempt = self._increment_attempt(ctx, step_id)
@@ -158,7 +171,7 @@ class SelfHealingExecutorOrchestrator:
             if attempt > self.config.max_repairs_per_step:
                 logger.error("MAX_REPAIRS_PER_STEP_EXCEEDED", extra={"step_id": step_id})
                 await self._handle_final_failure(result, repair_request, ctx)
-                return self._with_semantic_status(result, "failed")
+                return self._finalize_result(result, ctx, "failed")
 
             fingerprint = FailureFingerprint.compute(
                 step_id,
@@ -175,12 +188,12 @@ class SelfHealingExecutorOrchestrator:
                     extra={"step_id": step_id, "fingerprint": fingerprint, "count": count},
                 )
                 await self._handle_final_failure(result, repair_request, ctx)
-                return self._with_semantic_status(result, "failed")
+                return self._finalize_result(result, ctx, "failed")
 
             if not self.circuit_breaker.allow():
                 logger.error("CIRCUIT_BREAKER_OPEN")
                 await self._handle_final_failure(result, repair_request, ctx)
-                return self._with_semantic_status(result, "failed")
+                return self._finalize_result(result, ctx, "failed")
 
             try:
                 repaired_code, _ = await asyncio.wait_for(
@@ -210,7 +223,7 @@ class SelfHealingExecutorOrchestrator:
                         extra={"step_id": step_id, "attempt": attempt},
                     )
                     await self._handle_final_failure(result, repair_request, ctx)
-                    return self._with_semantic_status(result, "failed")
+                    return self._finalize_result(result, ctx, "failed")
 
                 # -----------------------------------
                 # Fallback-only limit (max 2)
@@ -224,7 +237,7 @@ class SelfHealingExecutorOrchestrator:
                         extra={"step_id": step_id},
                     )
                     await self._handle_final_failure(result, repair_request, ctx)
-                    return self._with_semantic_status(result, "failed")
+                    return self._finalize_result(result, ctx, "failed")
 
                 # -----------------------------------
                 # Call fallback LLM
@@ -237,9 +250,14 @@ class SelfHealingExecutorOrchestrator:
                     dom_snapshot=repair_request.artifacts.dom_snapshot,
                 )
                 logger.info(
-                    "FALLBACK_LLM_OUTPUT | step_id=%s | output=\n%s",
+                    "FALLBACK_LLM_OUTPUT | step_id=%s | chars=%s",
                     step_id,
-                    fallback_code,
+                    len(fallback_code or ""),
+                )
+                logger.debug(
+                    "FALLBACK_LLM_OUTPUT_PREVIEW | step_id=%s | preview=%s",
+                    step_id,
+                    self._preview_text(fallback_code),
                 )
 
                 if not fallback_code:
@@ -248,12 +266,12 @@ class SelfHealingExecutorOrchestrator:
                         extra={"step_id": step_id},
                     )
                     await self._handle_final_failure(result, repair_request, ctx)
-                    return self._with_semantic_status(result, "failed")
+                    return self._finalize_result(result, ctx, "failed")
 
                 step_fn = self._extract_step_function(step_id)
                 if not step_fn:
                     logger.error("INVALID_STEP_ID_FORMAT")
-                    return self._with_semantic_status(result, "failed")
+                    return self._finalize_result(result, ctx, "failed")
 
                 backup_path = self.patcher.patch_step(
                     script_path=script_path,
@@ -305,12 +323,12 @@ class SelfHealingExecutorOrchestrator:
 
             if not repaired_code:
                 logger.error("EMPTY_REPAIR_RESPONSE_FATAL")
-                return self._with_semantic_status(result, "failed")
+                return self._finalize_result(result, ctx, "failed")
 
             step_fn = self._extract_step_function(step_id)
             if not step_fn:
                 logger.error("INVALID_STEP_ID_FORMAT")
-                return self._with_semantic_status(result, "failed")
+                return self._finalize_result(result, ctx, "failed")
 
             # ----------------------------
             # APPLY PATCH
@@ -416,6 +434,13 @@ class SelfHealingExecutorOrchestrator:
             }
         )
 
+    @staticmethod
+    def _preview_text(value: Optional[str], limit: int = 500) -> str:
+        text = (value or "").strip()
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}... [truncated]"
+
     # ==================================================
     # RESULT REHYDRATION
     # ==================================================
@@ -432,6 +457,24 @@ class SelfHealingExecutorOrchestrator:
             return result
         except Exception:
             return result
+
+    def _finalize_result(self, result, ctx: ExecutionContext, semantic_status: str):
+        finalized = self._with_semantic_status(result, semantic_status)
+
+        try:
+            metadata = dict(getattr(finalized, "metadata", {}) or {})
+            metadata["repairs_attempted"] = len(ctx.repair_history)
+            metadata["repairs_successful"] = sum(
+                1
+                for item in ctx.repair_history
+                if item.get("outcome") in {"patched", "fallback_patched"}
+            )
+            metadata["repair_history"] = ctx.repair_history
+            finalized.metadata = metadata
+        except Exception:
+            logger.debug("Unable to attach execution metadata", exc_info=True)
+
+        return finalized
 
     # ==================================================
     # STATUS RESOLUTION

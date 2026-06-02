@@ -15,11 +15,13 @@ class ASTSecurityVisitor(ast.NodeVisitor):
         forbidden_imports: Set[str],
         allowed_imports: Set[str],
         forbidden_calls: Set[str],
+        forbidden_attrs: Set[str],
         strict_mode: bool,
     ):
         self.forbidden_imports = forbidden_imports
         self.allowed_imports = allowed_imports
         self.forbidden_calls = forbidden_calls
+        self.forbidden_attrs = forbidden_attrs
         self.strict_mode = strict_mode
         self.errors: List[str] = []
 
@@ -60,7 +62,7 @@ class ASTSecurityVisitor(ast.NodeVisitor):
 
         # 2. Method/Attribute call checks (e.g. os.listdir)
         elif isinstance(node.func, ast.Attribute):
-            if node.func.attr in self.forbidden_calls:
+            if node.func.attr in self.forbidden_calls or node.func.attr in self.forbidden_attrs:
                 self.errors.append(f"Forbidden method/function call: {node.func.attr}")
 
         self.generic_visit(node)
@@ -68,7 +70,11 @@ class ASTSecurityVisitor(ast.NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute):
         # Block access to magic/internal attributes
         attr = node.attr
-        if attr.startswith("__") or attr in {"subclasses", "mro"}:
+        if (
+            attr.startswith("__")
+            or attr in {"subclasses", "mro"}
+            or attr in self.forbidden_attrs
+        ):
             self.errors.append(f"Forbidden access to internal attribute: {attr}")
         self.generic_visit(node)
 
@@ -81,6 +87,8 @@ class ScriptSecurityValidator:
     """
 
     FORBIDDEN_IMPORTS: Set[str] = {
+        "subprocess",
+        "shutil",
         "ctypes",
         "multiprocessing",
         "signal",
@@ -100,6 +108,7 @@ class ScriptSecurityValidator:
         "resource",
         "sysconfig",
         "gc",
+        "importlib",
     }
 
     FORBIDDEN_CALLS: Set[str] = {
@@ -110,6 +119,54 @@ class ScriptSecurityValidator:
         "memoryview",
         "open",
         "listdir",
+    }
+
+    FORBIDDEN_ATTRS: Set[str] = {
+        "system",
+        "popen",
+        "spawn",
+        "spawnl",
+        "spawnle",
+        "spawnlp",
+        "spawnlpe",
+        "spawnv",
+        "spawnve",
+        "spawnvp",
+        "spawnvpe",
+        "run",
+        "Popen",
+        "call",
+        "check_call",
+        "check_output",
+        "rmtree",
+        "remove",
+        "unlink",
+        "replace",
+        "rename",
+        "rmdir",
+        "walk",
+        "scandir",
+        "kill",
+        "fork",
+        "forkpty",
+        "startfile",
+        "execl",
+        "execle",
+        "execlp",
+        "execlpe",
+        "execv",
+        "execve",
+        "execvp",
+        "execvpe",
+        "read_text",
+        "read_bytes",
+        "glob",
+        "rglob",
+        "iterdir",
+        "resolve",
+        "absolute",
+        "chmod",
+        "chown",
     }
 
     ALLOWED_IMPORTS: Set[str] = {
@@ -132,14 +189,9 @@ class ScriptSecurityValidator:
         "string",
         "uuid",
         "os",
-        "sys",
         "pathlib",
-        "subprocess",
-        "shutil",
-        "tempfile",
         "logging",
         "traceback",
-        "importlib",
     }
 
     DANGEROUS_PATTERNS: List[re.Pattern] = [
@@ -159,6 +211,7 @@ class ScriptSecurityValidator:
                 forbidden_imports=self.FORBIDDEN_IMPORTS,
                 allowed_imports=self.ALLOWED_IMPORTS,
                 forbidden_calls=self.FORBIDDEN_CALLS,
+                forbidden_attrs=self.FORBIDDEN_ATTRS,
                 strict_mode=self.strict_mode,
             )
             visitor.visit(tree)
@@ -167,8 +220,7 @@ class ScriptSecurityValidator:
         except SyntaxError as e:
             return False, f"Syntax Error: {e}"
         except Exception as e:
-            # Fallback to regex if parsing fails catastrophically
-            pass
+            return False, f"Security analysis failed: {e}"
 
         # 2. Regex-based defense-in-depth safety checks
         import_pattern = re.compile(r"(?:from\s+(\S+)\s+import|import\s+(\S+))")
@@ -189,6 +241,11 @@ class ScriptSecurityValidator:
             pattern = re.compile(rf"\b{func}\s*\(")
             if pattern.search(script_content):
                 return False, f"Forbidden function call: {func}"
+
+        for attr in self.FORBIDDEN_ATTRS:
+            pattern = re.compile(rf"\.\s*{attr}\s*\(")
+            if pattern.search(script_content):
+                return False, f"Forbidden method/function call: {attr}"
 
         for pattern in self.DANGEROUS_PATTERNS:
             if pattern.search(script_content):

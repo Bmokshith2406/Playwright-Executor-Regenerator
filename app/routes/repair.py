@@ -73,7 +73,7 @@ SCHEMA_VERSION = "3.0"
 async def repair_step(
     request: Request,
     payload: str = Form(..., description="JSON payload with step repair request"),
-    error_image: UploadFile | None = File(None, description="Screenshot at failure time (PNG only)"),
+    error_image: UploadFile | None = File(None, description="Screenshot at failure time (PNG, JPEG, or WebP)"),
 ):
     """
     Repair a failed Playwright step.
@@ -113,23 +113,23 @@ async def repair_step(
     error_image_bytes: Optional[bytes] = None
 
     if error_image:
-        if error_image.content_type not in settings.ALLOWED_SCREENSHOT_MIME_TYPES:
-            metrics.repair_requests_total.inc(outcome="invalid_input", action_type="unknown")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported image type. Allowed: {settings.ALLOWED_SCREENSHOT_MIME_TYPES}"
-            )
-
         image_bytes = await error_image.read()
 
         if len(image_bytes) > settings.MAX_SCREENSHOT_SIZE_BYTES:
             metrics.repair_requests_total.inc(outcome="invalid_input", action_type="unknown")
             raise HTTPException(status_code=400, detail="Image too large")
 
-        # Validate PNG signature
-        if image_bytes[:8] != b"\x89PNG\r\n\x1a\n":
+        detected_mime_type = _detect_image_mime_type(image_bytes)
+        if not detected_mime_type:
             metrics.repair_requests_total.inc(outcome="invalid_input", action_type="unknown")
-            raise HTTPException(status_code=400, detail="Invalid PNG file")
+            raise HTTPException(status_code=400, detail="Invalid image file")
+
+        if detected_mime_type not in settings.ALLOWED_SCREENSHOT_MIME_TYPES:
+            metrics.repair_requests_total.inc(outcome="invalid_input", action_type="unknown")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported image type. Allowed: {settings.ALLOWED_SCREENSHOT_MIME_TYPES}"
+            )
 
         error_image_bytes = image_bytes
 
@@ -361,3 +361,16 @@ def _error_response(
             "X-Schema-Version": SCHEMA_VERSION,
         },
     )
+
+
+def _detect_image_mime_type(image_bytes: bytes) -> Optional[str]:
+    if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+
+    if image_bytes[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+
+    if len(image_bytes) >= 12 and image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+
+    return None

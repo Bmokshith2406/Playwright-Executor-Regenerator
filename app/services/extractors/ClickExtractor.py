@@ -5,6 +5,7 @@ from app.core.llm_executor import LLMExecutor
 from app.models.extraction import ExtractedLocator
 from app.models.cir import LocatorStrategy
 from app.core.dom_pruner import DomPruner
+from app.core.prompts import build_click_extractor_prompt
 from app.services.extractors.BaseExtractor import BaseExtractor
 
 logger = logging.getLogger("click_extractor")
@@ -75,18 +76,12 @@ class ClickActionExtractor(BaseExtractor):
         pruned_dom = DomPruner.prune(dom_snapshot, keyword)
         self._last_dom_snapshot = pruned_dom or ""
 
-        prompt = f"""Analyze FAILED Playwright step.
-Identify CLICK action visible text (preserve casing/spacing exactly).
-No CSS/XPath. No hallucinated/invented values.
-
-Reply ONLY one of:
-- none
-- click:text("<EXACT visible text>")
-
-Intent: {step_intent}
-Code: {original_code}
-Error: {error_message}
-DOM: {pruned_dom or "N/A"}"""
+        prompt = build_click_extractor_prompt(
+            step_intent=step_intent,
+            original_code=original_code,
+            error_message=error_message,
+            dom_snapshot=pruned_dom,
+        )
 
         executor = LLMExecutor.get_instance()
 

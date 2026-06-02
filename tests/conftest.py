@@ -23,6 +23,10 @@ os.environ["ENABLE_API_AUTH"] = "false"
 os.environ["ENABLE_RATE_LIMITING"] = "false"
 os.environ["ENABLE_METRICS"] = "false"
 os.environ["ENABLE_TRACING"] = "false"
+os.environ["MONGODB_URL"] = ""
+os.environ["REDIS_URL"] = ""
+os.environ["CELERY_BROKER_URL"] = ""
+os.environ["CELERY_RESULT_BACKEND"] = ""
 
 from fastapi.testclient import TestClient
 from httpx import AsyncClient, ASGITransport
@@ -341,6 +345,18 @@ def valid_png_bytes() -> bytes:
 def invalid_png_bytes() -> bytes:
     """Provide invalid PNG bytes for testing."""
     return b"not a png file"
+
+
+@pytest.fixture
+def valid_jpeg_bytes() -> bytes:
+    """Provide valid-enough JPEG signature bytes for upload validation tests."""
+    return b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+
+
+@pytest.fixture
+def valid_webp_bytes() -> bytes:
+    """Provide valid-enough WebP signature bytes for upload validation tests."""
+    return b"RIFF\x16\x00\x00\x00WEBPVP8 \x0a\x00\x00\x00"
 
 
 # ==================================================

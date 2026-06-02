@@ -6,6 +6,7 @@ from app.core.llm_executor import LLMExecutor
 from app.models.extraction import ExtractedAssertion, ExtractedLocator
 from app.models.cir import AssertionType, LocatorStrategy, StepWait
 from app.core.dom_pruner import DomPruner
+from app.core.prompts import build_assert_extractor_prompt
 from app.services.extractors.BaseExtractor import BaseExtractor
 
 logger = logging.getLogger("assert_extractor")
@@ -89,20 +90,12 @@ class AssertActionExtractor(BaseExtractor):
         pruned_dom = DomPruner.prune(dom_snapshot, keyword)
         self._last_dom_snapshot = pruned_dom or ""
 
-        prompt = f"""Analyze FAILED Playwright assertion.
-Identify assertion details (preserve visible text casing/spacing exactly).
-No CSS/XPath. No invented values.
-
-Reply ONLY one of:
-- none
-- url_contains:<fragment>
-- element_visible
-- element_visible:text("<EXACT visible text>")
-
-Intent: {step_intent}
-Code: {original_code}
-Error: {error_message}
-DOM: {pruned_dom or "N/A"}"""
+        prompt = build_assert_extractor_prompt(
+            step_intent=step_intent,
+            original_code=original_code,
+            error_message=error_message,
+            dom_snapshot=pruned_dom,
+        )
 
         executor = LLMExecutor.get_instance()
 

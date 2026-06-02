@@ -52,12 +52,13 @@ settings = get_settings()
 
 class PrettyFormatter(logging.Formatter):
     """
-    Highly readable, colorized, and emoji-enriched formatter for normal people.
+    Enterprise-grade, clean, and highly readable console log formatter.
     """
-    # ANSI Escape Sequences
+    # ANSI escape sequences
     RESET = "\033[0m"
     BOLD = "\033[1m"
     DIM = "\033[2m"
+    UNDERLINE = "\033[4m"
     
     # Colors
     RED = "\033[31m"
@@ -68,62 +69,55 @@ class PrettyFormatter(logging.Formatter):
     CYAN = "\033[36m"
     GRAY = "\033[90m"
 
-    LEVEL_MAP = {
-        "DEBUG": ("🔍", "\033[36mDEBUG\033[0m"),
-        "INFO": ("✨", "\033[32mINFO \033[0m"),
-        "WARNING": ("⚠️", "\033[33mWARN \033[0m"),
-        "ERROR": ("❌", "\033[31mERROR\033[0m"),
-        "CRITICAL": ("🚨", "\033[1m\033[31mCRIT \033[0m"),
+    # Status indicators (single emoji representing the outcome/status of the log)
+    LEVEL_INDICATORS = {
+        "DEBUG": "🔍",
+        "INFO": "✨",
+        "WARNING": "⚠️",
+        "ERROR": "❌",
+        "CRITICAL": "🚨",
+    }
+    
+    # Level badges with formatting
+    LEVEL_BADGES = {
+        "DEBUG": f"\033[36mDEBUG\033[0m",
+        "INFO": f"\033[32mINFO \033[0m",
+        "WARNING": f"\033[33mWARN \033[0m",
+        "ERROR": f"\033[31m\033[1mERROR\033[0m",
+        "CRITICAL": f"\033[31m\033[1m\033[4mCRIT \033[0m",
     }
 
-    LOGGER_EMOJI_MAP = {
-        "app": "🚀",
-        "llm": "🤖",
-        "api.repair": "🔧",
-        "api.executor": "🏃",
-        "security": "🔑",
-        "metrics": "📊",
-        "health": "🩺",
-        "tracing": "👁️",
-        "cir.builder": "🧱",
-        "atomic_normalizer": "🧹",
-        "uvicorn.access": "🌐",
-        "uvicorn.error": "⚡",
+    # Short display names for loggers to align them cleanly
+    LOGGER_NAME_MAP = {
+        "uvicorn.error": "uvicorn",
+        "uvicorn.access": "access",
+        "api.repair": "api-repair",
+        "api.executor": "api-exec",
+        "cir.builder": "cir-build",
+        "atomic_normalizer": "normalizer",
     }
 
     def format(self, record):
-        # Resolve log level configuration
         lvl = record.levelname
-        level_emoji, lvl_str = self.LEVEL_MAP.get(lvl, ("📝", lvl))
+        indicator = self.LEVEL_INDICATORS.get(lvl, "📝")
+        if record.name.startswith("uvicorn.access"):
+            indicator = "🌐"
+        badge = self.LEVEL_BADGES.get(lvl, f"{lvl:<5}")
         
-        # Match logger emoji
-        logger_name = record.name
-        logger_emoji = ""
-        for k, v in self.LOGGER_EMOJI_MAP.items():
-            if logger_name == k or logger_name.startswith(k + "."):
-                logger_emoji = v + " "
-                break
-        
-        # Format timestamp as clean [HH:MM:SS]
+        # Format time: HH:MM:SS
         asctime = self.formatTime(record, "%H:%M:%S")
-        time_str = f"{self.GRAY}[{asctime}]{self.RESET}"
+        time_str = f"{self.GRAY}{asctime}{self.RESET}"
         
-        # Highlight component/logger name
-        # Customize logger display name to be user-friendly
-        display_name = logger_name
-        if logger_name == "uvicorn.error":
-            display_name = "uvicorn"
-        elif logger_name == "uvicorn.access":
-            display_name = "access"
-            
-        short_logger = display_name.split(".")[-1]
-        logger_str = f"{self.MAGENTA}{self.BOLD}[{short_logger:<10}]{self.RESET}"
+        # Format logger/component name with fixed-width alignment
+        logger_name = record.name
+        display_name = self.LOGGER_NAME_MAP.get(logger_name, logger_name.split(".")[-1])
+        component_str = f"{self.BLUE}{self.BOLD}[{display_name:<10}]{self.RESET}"
         
-        # Get main message
+        # Format message
         record.message = record.getMessage()
         message_str = record.message
         
-        # Handle special access log formatting
+        # Colorize access log or standard messages
         if logger_name == "uvicorn.access" and record.args and len(record.args) >= 5:
             try:
                 client = record.args[0]
@@ -146,38 +140,36 @@ class PrettyFormatter(logging.Formatter):
             except Exception:
                 pass
         else:
-            # Apply standard level-based coloring to the message text
             if lvl in ("ERROR", "CRITICAL"):
                 message_str = f"{self.BOLD}{self.RED}{message_str}{self.RESET}"
             elif lvl == "WARNING":
                 message_str = f"{self.YELLOW}{message_str}{self.RESET}"
         
-        # Format correlation ID and other extras nicely
+        # Format extra keys (req_id, run_id, etc.)
         extras = getattr(record, "extras", {})
         extras_list = []
         if isinstance(extras, dict):
             corr_id = extras.get("correlation_id", None)
             if corr_id:
-                extras_list.append(f"{self.CYAN}req_id={corr_id}{self.RESET}")
-            
-            # Check for run_id, step_id, execution_id etc.
+                extras_list.append(f"req_id={corr_id}")
             for k, v in extras.items():
                 if k not in ("correlation_id",) and v is not None:
-                    extras_list.append(f"{self.GRAY}{k}={v}{self.RESET}")
+                    extras_list.append(f"{k}={v}")
         
-        extras_str = f" {self.DIM}({', '.join(extras_list)}){self.RESET}" if extras_list else ""
+        extras_str = ""
+        if extras_list:
+            extras_str = f" {self.GRAY}|{self.RESET} {self.DIM}{self.CYAN}{' '.join(extras_list)}{self.RESET}"
+            
+        # Assemble clean, aligned log line
+        log_line = f"{indicator} {time_str} {component_str} {badge} - {message_str}{extras_str}"
         
-        # Assemble line
-        log_line = f"{level_emoji} {logger_emoji}{time_str} {logger_str} {lvl_str} - {message_str}{extras_str}"
-        
-        # Tracebacks
+        # Clean tracebacks with vertical line prefix
         if record.exc_info:
             exc_text = self.formatException(record.exc_info)
-            # Dim the traceback to highlight actual log message, and colorized
-            colored_exc = "\n".join(f"{self.RED}│ {line}{self.RESET}" for line in exc_text.splitlines())
+            colored_exc = "\n".join(f"{self.RED}│{self.RESET} {self.GRAY}{line}{self.RESET}" for line in exc_text.splitlines())
             log_line += f"\n{colored_exc}"
         elif record.exc_text:
-            colored_exc = "\n".join(f"{self.RED}│ {line}{self.RESET}" for line in record.exc_text.splitlines())
+            colored_exc = "\n".join(f"{self.RED}│{self.RESET} {self.GRAY}{line}{self.RESET}" for line in record.exc_text.splitlines())
             log_line += f"\n{colored_exc}"
             
         return log_line
@@ -187,7 +179,8 @@ RESERVED_KEYS = {
     "name", "msg", "args", "levelname", "levelno", "pathname",
     "filename", "module", "exc_info", "exc_text", "stack_info",
     "lineno", "funcName", "created", "msecs", "relativeCreated",
-    "thread", "threadName", "processName", "process"
+    "thread", "threadName", "processName", "process",
+    "taskName", "color_message", "task_name"
 }
 
 

@@ -7,24 +7,50 @@
 
 ---
 
-A production-grade, AI-driven self-healing automation microservice designed to intercept Playwright test failures, diagnose locator/interruption issues using Google Gemini, validate code modifications in a secure AST-audited Python sandbox, and automatically patch test scripts.
+A production-grade, AI-driven self-healing automation microservice designed to intercept Playwright test failures, diagnose locator and interruption issues using Google Gemini, validate proposed code changes with strict AST inspection, and automatically patch test scripts without changing the public FastAPI route surface.
+
+## Current API Surface
+
+The live FastAPI exports are:
+
+- `POST /repair`
+- `POST /executor`
+- `POST /executor/run`
+- `GET /executor/stats`
+- `GET /health`, `GET /health/live`, `GET /health/ready`, `GET /health/startup`, `GET /health/deep`
+- `GET /metrics`
+- `GET /info`
+
+`app/api/v1/*` still exists only as a compatibility layer that re-exports the live routers in `app/routes/*`.
+
+## Operational Defaults
+
+The service now ships with production-safe defaults:
+
+- API-key authentication is enabled by default.
+- Executor sandbox validation is enabled by default.
+- Production execution requires Docker sandboxing unless you set an explicit override.
+- Repair screenshots can be provided as PNG, JPEG, or WebP.
+- MongoDB fallback to in-memory storage is allowed in development, but no longer happens silently in production.
 
 ---
 
 ## 📖 Table of Contents
-1. [Core Philosophy (Why, What, & How)](#-core-philosophy-why-what--how)
-2. [E2E Self-Healing Failure Lifecycle](#-e2e-self-healing-failure-lifecycle)
-3. [Architecture and High-Level Design](#-architecture-and-high-level-design)
-4. [Deep Dive: AST-Based Security Sandbox](#-deep-dive-ast-based-security-sandbox)
-5. [Deep Dive: DOM Pruner & AST Tag-Tree Parsing](#-deep-dive-dom-pruner--ast-tag-tree-parsing)
-6. [Data Repository Models & Index Specification](#-data-repository-models--index-specification)
-7. [Action Extractors & Prompt Engineering Specs](#-action-extractors--prompt-engineering-specs)
-8. [Observability, Health Checks, & Prometheus Metrics](#-observability-health-checks--prometheus-metrics)
-9. [Detailed File Map & Directory Index](#-detailed-file-map--directory-index)
-10. [Configuration & Environment Variables](#-configuration--environment-variables)
-11. [Setup, Running, and Deployment CLI Commands](#-setup-running-and-deployment-cli-commands)
-12. [Developer Guide: Extending and Adding New Action Extractors](#-developer-guide-extending-and-adding-new-action-extractors)
-13. [Troubleshooting & Support Matrix](#-troubleshooting--support-matrix)
+1. [Current API Surface](#current-api-surface)
+2. [Operational Defaults](#operational-defaults)
+3. [Core Philosophy (Why, What, & How)](#-core-philosophy-why-what--how)
+4. [E2E Self-Healing Failure Lifecycle](#-e2e-self-healing-failure-lifecycle)
+5. [Architecture and High-Level Design](#-architecture-and-high-level-design)
+6. [Deep Dive: AST-Based Security Sandbox](#-deep-dive-ast-based-security-sandbox)
+7. [Deep Dive: DOM Pruner & AST Tag-Tree Parsing](#-deep-dive-dom-pruner--ast-tag-tree-parsing)
+8. [Data Repository Models & Index Specification](#-data-repository-models--index-specification)
+9. [Action Extractors & Prompt Engineering Specs](#-action-extractors--prompt-engineering-specs)
+10. [Observability, Health Checks, & Prometheus Metrics](#-observability-health-checks--prometheus-metrics)
+11. [Detailed File Map & Directory Index](#-detailed-file-map--directory-index)
+12. [Configuration & Environment Variables](#-configuration--environment-variables)
+13. [Setup, Running, and Deployment CLI Commands](#-setup-running-and-deployment-cli-commands)
+14. [Developer Guide: Extending and Adding New Action Extractors](#-developer-guide-extending-and-adding-new-action-extractors)
+15. [Troubleshooting & Support Matrix](#-troubleshooting--support-matrix)
 
 ---
 
@@ -60,13 +86,13 @@ graph TD
 The engine coordinates step resolution through ten structured phases:
 
 1. **Failure Interception**: A custom test-runner hook traps standard Playwright errors (e.g. `TimeoutError` on wait_for_selector).
-2. **Context Serialization**: The runner serializes the failing file path, failing line number, natural language intent, stack trace, page screenshot (PNG), and HTML DOM snapshot.
-3. **Trigger Ingestion**: The payload hits `/repair` or is queued asynchronously as a Celery task.
+2. **Context Serialization**: The runner serializes the failing file path, failing line number, natural language intent, stack trace, page screenshot (PNG, JPEG, or WebP), and HTML DOM snapshot.
+3. **Trigger Ingestion**: The payload hits `/repair` directly, or can be queued asynchronously when the optional Celery worker stack is installed.
 4. **Action Classification**: The engine determines the action category (e.g. `Click`, `Type`, `Select`, `Assert`, or JavaScript `Dialog` intercept).
 5. **DOM Compression**: The raw DOM HTML is compressed into an indented AST tag-tree containing only interactive elements and nodes matching keywords.
 6. **LLM Hint Synthesis**: The LLM analyzes the failure context to identify target elements, returning precise semantic strings (e.g. `click:text("Submit")`).
 7. **Intermediate Representation**: The engine builds a Canonical Intermediate Representation (CIR) block containing locator strategies and payload structures.
-8. **Sandbox Auditing & Verification**: The proposal is compiled into code and run inside an AST-audited subprocess, checking process output and exit codes.
+8. **Sandbox Auditing & Verification**: The proposal is compiled into code, validated with strict AST and pattern checks, and then executed in the configured sandbox path.
 9. **Real-time Disk Patching**: Upon validation, the script patcher updates the locator code inside the original test script.
 10. **Execution Resumption**: The test runner restarts execution, picking up from the patched instruction.
 
@@ -110,11 +136,11 @@ The service is built around modular, decoupled components to limit code clutter:
                         └───────────────────────┘
 ```
 
-* **Gateway (FastAPI)**: Manages authentication, rate limiting, and structured logging.
-* **Orchestrator**: Coordinates execution, manages state, and triggers rollbacks on failure.
-* **Registry & Factory**: The [ExtractorFactory](file:///c:/Users/Mokshith%20Balidi/Downloads/Executor-Regenrator/app/services/extractors/ExtractorFactory.py) maps action types to specialized extractors.
-* **AST Sandbox**: Runs proposal validation in an isolated console subprocess.
-* **Patcher**: Automatically modifies code on disk.
+* **Gateway (FastAPI)**: Manages API-key authentication, rate limiting, structured logging, and the unchanged public route surface.
+* **Orchestrator**: Coordinates execution, manages self-healing state, records repair metadata, and triggers rollbacks on failure.
+* **Registry & Factory**: `app/services/extractors/ExtractorFactory.py` maps action types to specialized extractors.
+* **AST Sandbox**: Rejects dangerous imports and host-operation primitives before execution and can delegate execution to Docker in production.
+* **Patcher**: Automatically modifies code on disk while keeping backups for rollback.
 
 ---
 
@@ -126,14 +152,15 @@ Running dynamically generated code poses security risks. Simple regex checks (e.
 getattr(__builtins__, "__im" + "port__")("o" + "s").system("rm -rf /")
 ```
 
-The [ScriptSecurityValidator](file:///c:/Users/Mokshith%20Balidi/Downloads/Executor-Regenrator/app/executors/sandbox.py) prevents this via two-layer security validation:
+`app/executors/sandbox.py` provides this protection through two-layer validation:
 1. **Abstract Syntax Tree (AST) Visitor**: Parses the script into structured syntax nodes and walks the tree.
 2. **Regex Defense-in-depth**: Standard validation pattern checks.
 
 ### AST Node Security Rules
-* **Attribute Access**: Blocks accesses to attributes starting with `__` (e.g. `__dict__`, `__code__`, `__globals__`) or matching keys like `subclasses` and `mro`.
+* **Attribute Access**: Blocks accesses to attributes starting with `__` (e.g. `__dict__`, `__code__`, `__globals__`) or matching keys such as `subclasses`, `mro`, `system`, `popen`, `run`, `remove`, `unlink`, and `rmtree`.
 * **Dynamic Attribute Resolution**: Blocks calls to `getattr`, `setattr`, or `delattr` if the attribute argument is a dynamic expression. If it is a string constant, it must not match blocked keywords.
-* **Import Declarations**: Restricts imports to a whitelisted set of libraries (`playwright`, `asyncio`, `re`, `json`, `math`). All other libraries are blocked.
+* **Import Declarations**: Restricts imports to a safe allowlist and explicitly forbids modules such as `os`, `subprocess`, `shutil`, `socket`, and `importlib`.
+* **Execution Guardrail**: In production, the executor refuses host execution unless Docker sandboxing is enabled or an explicit override is configured.
 
 ### Code Block Examples: Blocked vs. Allowed
 #### Blocked (Dynamic Bypass)
@@ -151,23 +178,15 @@ object.__subclasses__()
 
 #### Allowed (Standard Playwright)
 ```python
-# AST Visitor verifies imports and allows safe Playwright methods
-from playwright.async_api import async_playwright
-import asyncio
-
-async def run():
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        page = await browser.new_page()
-        await page.goto("http://example.com")
-        await browser.close()
+# AST Visitor allows simple safe code paths
+print("sandbox validation passed")
 ```
 
 ---
 
 ## 🌲 Deep Dive: DOM Pruner & AST Tag-Tree Parsing
 
-To prevent prompt bloat and keep token sizes compact for low-latency LLMs, the [DomPruner](file:///c:/Users/Mokshith%20Balidi/Downloads/Executor-Regenrator/app/core/dom_pruner.py) compresses raw HTML into an AST-like hierarchical tag tree.
+To prevent prompt bloat and keep token sizes compact for low-latency LLMs, `app/core/dom_pruner.py` compresses raw HTML into an AST-like hierarchical tag tree.
 
 ### Pruning Logic
 1. **Garbage Collection**: Decomposes all non-visible metadata tags (`script`, `style`, `meta`, `link`, `noscript`).
@@ -269,6 +288,8 @@ Optimizes queries and manages storage:
 ## 🤖 Action Extractors & Prompt Engineering Specs
 
 Extractors are defined in `app/services/extractors/`.
+
+The canonical source for every live LLM prompt now lives in [app/core/prompts.py](</C:/Users/Mokshith%20Balidi/Downloads/Executor-Regenrator/app/core/prompts.py:1>). The examples below describe the prompt contracts, but the registry file is the single place to edit prompt wording, truncation rules, and response formats.
 
 ```
                   ┌───────────────┐
@@ -401,7 +422,9 @@ The engine monitors health and exports operational metrics via Prometheus.
 
 ### Health Checks Integration
 * `/health/live`: Basic application life check.
-* `/health/ready`: Checks connections to external dependencies (MongoDB and Redis).
+* `/health/ready`: Checks startup completion, API-key configuration, MongoDB, Redis, disk space, and memory.
+* `/health/startup`: Verifies startup prerequisites before the service begins receiving traffic.
+* `/health/deep`: Includes a cached, low-token LLM connectivity check in addition to the readiness checks.
 
 ---
 
@@ -409,10 +432,12 @@ The engine monitors health and exports operational metrics via Prometheus.
 
 ```text
 app/
-├── api/                        # HTTP Endpoint Request Controllers
+├── api/                        # Compatibility router exports
 │   └── v1/
-│       ├── executor.py         # Async script execution API handler
-│       └── repair.py           # Single playwright step repair API handler
+│       ├── executor.py         # Compatibility wrapper to app/routes/executor.py
+│       ├── health.py           # Compatibility wrapper to app/routes/health.py
+│       ├── metrics.py          # Compatibility wrapper to app/routes/metrics.py
+│       └── repair.py           # Compatibility wrapper to app/routes/repair.py
 ├── core/                       # Core system services
 │   ├── exceptions/             # Exceptions package
 │   │   ├── __init__.py         # Package entry exposing global error handler
@@ -434,6 +459,7 @@ app/
 │   ├── llm_executor.py         # Gemini API wrapper with rate-limit retries
 │   ├── llm_json.py             # Cleans and parses JSON returns from the LLM
 │   ├── metrics.py              # Prometheus metrics collector definitions
+│   ├── prompts.py              # Central registry for every live LLM prompt and prompt-trimming helper
 │   ├── redis_state.py          # State/cache management for long-running processes
 │   ├── resilience.py           # CircuitBreaker and Exponential Backoff definitions
 │   ├── security.py             # API key checkers & rate limit algorithms
@@ -451,7 +477,7 @@ app/
 │   ├── database.py             # DB persistence schemas (RepairRecord, ExecutionRecord)
 │   ├── extraction.py           # Models for locator values returned from extractors
 │   └── step_repair.py          # Pydantic schemas for /repair endpoints
-├── routes/                     # FastAPI route groups
+├── routes/                     # Live FastAPI route groups mounted by app.main
 │   ├── executor.py             # Router for script runs
 │   ├── health.py               # Router for health status
 │   ├── metrics.py              # Router for Prometheus metrics
@@ -469,6 +495,7 @@ app/
 │   ├── atomic_normalizer.py    # Text normalizer and spacing standardizer
 │   ├── auto_repair_trigger.py  # Parses failure directories to build StepRepairRequests
 │   ├── cir_builder.py          # Constructs StepRepairRequests into a CIR block schema
+│   ├── diff.py                 # Unified diff utility for showing patched code changes
 │   ├── execution_orchestrator.py # Manages healing loops, run dirs, and error checks
 │   ├── generator.py            # Generates playwright code from normalized locators
 │   ├── llm_classifier.py       # Interrogates LLM to classify action types
@@ -477,8 +504,10 @@ app/
 │   ├── repair_pipeline.py      # Executes CIR build, gen, and sandbox verify
 │   ├── repair_service.py       # Handles FastAPI-level repair actions
 │   ├── rollback.py             # Backups and restores script files on failure
+│   ├── script_patcher.py       # Patches step body & guarded-step string args on disk
 │   ├── step_modifier.py        # Generates modified code variations
-│   └── step_verifier.py        # Validates code proposals in sandboxed subprocesses
+│   ├── step_verifier.py        # Validates code proposals in sandboxed subprocesses
+│   └── validator.py            # Pre-flight code and intent validators
 ├── tasks/                      # Asynchronous tasks
 │   ├── celery_app.py           # Celery application configuration
 │   └── repair_tasks.py         # Asynchronous worker tasks (Celery)
@@ -492,22 +521,40 @@ app/
 
 | Variable Name | Data Type | Default Value | Description |
 |---|---|---|---|
-| `ENV` | Literal | `development` | Running env: `development`, `staging`, or `production` |
-| `GOOGLE_API_KEY` | string | `None` | Primary Google Gemini LLM API Key |
-| `GOOGLE_API_KEYS` | List (CSV/JSON) | `[]` | List of fallback keys for rotation |
-| `API_SECRET_KEY` | string | `None` | Client authorization secret key |
-| `API_KEY_HEADER` | string | `X-API-Key` | Header name containing client key |
-| `ALLOWED_API_KEYS` | List (CSV/JSON) | `[]` | Whitelisted keys allowed for execution |
-| `MAX_REQUEST_SIZE_BYTES` | integer | `5000000` | Maximum size in bytes of incoming JSON |
-| `MONGODB_URL` | string | `None` | Connection string for MongoDB (Motor) |
-| `MONGODB_DB_NAME` | string | `repair_engine` | DB name used in MongoDB |
-| `REDIS_URL` | string | `None` | Connection string for Redis cache |
-| `CELERY_BROKER_URL` | string | `None` | Celery broker URL (Redis or RabbitMQ) |
-| `CELERY_RESULT_BACKEND` | string | `None` | Celery backend storage URL |
-| `ENABLE_SELF_HEALING` | boolean | `True` | Global toggle to enable/disable repairs |
-| `SANDBOX_ENABLED` | boolean | `True` | Run script validation inside sandbox |
-| `LOG_LEVEL` | string | `INFO` | Level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `LOG_FORMAT_MODE` | string | `CONSOLE` | Format mode: `JSON`, `CONSOLE`, or `PRETTY` (colorized & emoji-enriched) |
+| `ENV` | literal | `development` | Running environment: `development`, `staging`, or `production` |
+| `GOOGLE_API_KEY` | string | `None` | Primary Gemini API key |
+| `GOOGLE_API_KEYS` | list | `[]` | Additional API keys for rotation |
+| `ENABLE_API_AUTH` | boolean | `True` | Enables API-key authentication on protected routes |
+| `ALLOWED_API_KEYS` | list | `[]` | Accepted API keys when auth is enabled |
+| `API_SECRET_KEY` | string | `None` | Legacy shared secret option for auth |
+| `API_KEY_HEADER` | string | `X-API-Key` | Header name used for API-key auth |
+| `ENABLE_SELF_HEALING` | boolean | `True` | Enables the repair loop during executor runs |
+| `ENABLE_SANDBOX_EXECUTION` | boolean | `True` | Enables strict validation for uploaded scripts |
+| `SANDBOX_ENABLED` | boolean | `True` | Keeps low-level sandbox execution paths enabled |
+| `SANDBOX_USE_DOCKER` | boolean | `False` | Executes uploaded scripts inside Docker instead of the host Python process |
+| `SANDBOX_ALLOW_NETWORK` | boolean | `False` | Allows outbound network when Docker sandboxing is enabled |
+| `SANDBOX_DOCKER_IMAGE` | string | `python:3.11-slim` | Docker image used for sandbox execution |
+| `ALLOW_UNSAFE_HOST_EXECUTION_IN_PRODUCTION` | boolean | `False` | Explicit override for host execution in production; keep this `False` unless you fully trust the caller and host |
+| `MAX_REQUEST_SIZE_BYTES` | integer | `5000000` | Maximum multipart or JSON payload size |
+| `MAX_SCREENSHOT_SIZE_BYTES` | integer | `10000000` | Maximum screenshot upload size |
+| `ALLOWED_SCREENSHOT_MIME_TYPES` | list | `image/png,image/jpeg,image/webp` | Supported repair screenshot content types |
+| `MONGODB_URL` | string | `None` | MongoDB connection string |
+| `MONGODB_DB_NAME` | string | `repair_engine` | MongoDB database name |
+| `ALLOW_INMEMORY_DATABASE_FALLBACK` | boolean | `False` | Allows MongoDB failures to fall back to in-memory storage outside development |
+| `REDIS_URL` | string | `None` | Redis connection string used by caches and distributed state |
+| `REDIS_MAX_CONNECTIONS` | integer | `10` | Maximum Redis pool size |
+| `CELERY_BROKER_URL` | string | `None` | Optional Celery broker URL |
+| `CELERY_RESULT_BACKEND` | string | `None` | Optional Celery result backend |
+| `CELERY_TASK_TIMEOUT` | integer | `300` | Hard execution timeout for Celery tasks |
+| `CELERY_TASK_SOFT_TIMEOUT` | integer | `270` | Soft timeout for Celery tasks |
+| `CELERY_WORKER_PREFETCH_MULTIPLIER` | integer | `1` | Worker prefetch multiplier |
+| `CELERY_WORKER_CONCURRENCY` | integer | `4` | Default Celery worker concurrency |
+| `EXECUTOR_TIMEOUT_SECONDS` | integer | `800` | Maximum executor runtime per script |
+| `ENABLE_RATE_LIMITING` | boolean | `True` | Enables request throttling |
+| `ENABLE_METRICS` | boolean | `True` | Enables metrics middleware and `/metrics` |
+| `ENABLE_TRACING` | boolean | `False` | Enables tracing middleware |
+| `LOG_LEVEL` | string | `INFO` | Log level |
+| `LOG_FORMAT_MODE` | string | `CONSOLE` | `JSON`, `CONSOLE`, or `PRETTY` |
 
 ---
 
@@ -519,7 +566,30 @@ Install python dependencies:
 pip install -r requirements.txt
 ```
 
-### 2. Start Dev Web Server
+Create a local `.env` with at least:
+
+```bash
+GOOGLE_API_KEY=your-gemini-key
+ALLOWED_API_KEYS=["client_sec_key"]
+ENABLE_API_AUTH=true
+ENABLE_SANDBOX_EXECUTION=true
+```
+
+If you want durable persistence and distributed state, also configure:
+
+```bash
+MONGODB_URL=mongodb://localhost:27017
+REDIS_URL=redis://localhost:6379/0
+```
+
+For production executor isolation, enable Docker sandboxing:
+
+```bash
+SANDBOX_USE_DOCKER=true
+SANDBOX_DOCKER_IMAGE=python:3.11-slim
+```
+
+### 2. Start the API Server
 You can start the web server in any of the three logging format modes.
 
 **Recommended: Pretty log format mode (highly readable, colorized, emoji-enriched logs)**
@@ -531,7 +601,7 @@ python run.py --mode pretty
 ```bash
 python run.py --mode console
 # Or start uvicorn directly:
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 **JSON structured logging mode (for production log drains like Datadog/Splunk):**
@@ -540,7 +610,7 @@ python run.py --mode json
 ```
 
 ### 3. Start Background Celery Workers
-Start Celery task daemon:
+Start Celery only if you are using the optional async worker path:
 ```bash
 celery -A app.tasks.celery_app worker --loglevel=info --concurrency=4
 ```
@@ -548,7 +618,7 @@ celery -A app.tasks.celery_app worker --loglevel=info --concurrency=4
 ### 4. Running the Complete Test Suite
 Execute pytest validations:
 ```bash
-python -m pytest -v
+python -m pytest -q
 ```
 
 ### 5. Client Invocation Examples
@@ -557,7 +627,7 @@ python -m pytest -v
 curl -X POST "http://localhost:8000/repair" \
   -H "accept: application/json" \
   -H "X-API-Key: client_sec_key" \
-  -F "error_image=@tests/artifacts/screenshot.png;type=image/png" \
+  -F "error_image=@tests/artifacts/screenshot.webp;type=image/webp" \
   -F "payload={
     \"step_id\": \"checkout__step_4\",
     \"step_intent\": \"click on Submit Checkout button\",
@@ -582,6 +652,8 @@ curl -X POST "http://localhost:8000/executor/run" \
   -H "X-API-Key: client_sec_key" \
   -F "script=@tests/scripts/failing_test.py"
 ```
+
+If you intentionally disable executor sandboxing in development, `/executor` will still reject requests in non-development environments.
 
 ---
 
@@ -647,13 +719,22 @@ class ExtractorFactory:
 * **Cause**: Python shadowing issue where `app/core/exceptions.py` conflicted with the `app/core/exceptions/` directory.
 * **Resolution**: Delete `app/core/exceptions.py` and ensure the handler is imported in `app/core/exceptions/__init__.py`.
 
-### Issue 2: MongoDB Queries Blocking or Hanging
-* **Cause**: MongoDB is down or unreachable, and the driver is waiting indefinitely.
-* **Resolution**: Ensure timeouts are configured during initialization:
-  ```python
-  client = AsyncIOMotorClient(MONGODB_URL, serverSelectionTimeoutMS=5000)
-  ```
+### Issue 2: Readiness Fails Because MongoDB Is Configured but Unavailable
+* **Cause**: `MONGODB_URL` is set, but the database cannot be reached. In development the repository can fall back to memory, but readiness still reports the dependency failure.
+* **Resolution**: Restore MongoDB connectivity, remove `MONGODB_URL` if you intentionally want in-memory mode, or explicitly set `ALLOW_INMEMORY_DATABASE_FALLBACK=true` for non-development environments where that tradeoff is acceptable.
 
-### Issue 3: Pydantic Validation Error for Environment Variables
+### Issue 3: Executor Returns `503 Executor sandbox is disabled`
+* **Cause**: `/executor` is protected against unsandboxed execution outside development.
+* **Resolution**: Re-enable `ENABLE_SANDBOX_EXECUTION`, or in production configure `SANDBOX_USE_DOCKER=true`. Host execution in production requires `ALLOW_UNSAFE_HOST_EXECUTION_IN_PRODUCTION=true`.
+
+### Issue 4: Pydantic Validation Error for Environment Variables
 * **Cause**: Environment variables for lists (e.g. `CORS_ORIGINS`) are configured as comma-separated lists instead of JSON arrays.
 * **Resolution**: Standardize configuration list fields using the custom `@field_validator` with CSV parsing fallback.
+
+### Issue 5: `python run.py` Hangs or Fails to Start
+* **Cause**: The default host `0.0.0.0` can trigger Windows Defender Firewall prompts or fail to bind depending on shell permissions. Alternatively, a zombie python.exe process from a previous run may still hold port 8000.
+* **Resolution**: 
+  - Run `python run.py` — it now binds to `127.0.0.1` by default, which avoids Windows Firewall issues.
+  - If port is taken: `tasklist /FI "IMAGENAME eq python.exe"` and `taskkill /PID <pid> /F`.
+  - If dependencies are missing: activate the virtual environment first with `.\venv\Scripts\activate`.
+  - To expose the server on the network explicitly: `python run.py --host 0.0.0.0`.

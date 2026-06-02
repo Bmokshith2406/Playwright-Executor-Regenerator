@@ -5,6 +5,7 @@ import logging
 from app.core.llm_executor import LLMExecutor
 from app.models.extraction import ExtractedLocator
 from app.core.dom_pruner import DomPruner
+from app.core.prompts import build_dialog_extractor_prompt
 from app.models.cir import DialogAction, LocatorStrategy
 from app.services.extractors.BaseExtractor import BaseExtractor
 
@@ -92,22 +93,12 @@ class DialogActionExtractor(BaseExtractor):
         pruned_dom = DomPruner.prune(dom_snapshot, keyword)
         self._last_dom_snapshot = pruned_dom or ""
 
-        prompt = f"""Analyze FAILED Playwright step for RUNTIME DIALOG or POPUP.
-Identify dialog action and visible text (if any).
-
-Reply ONLY one of:
-- none
-- dialog:accept:text("<visible text>")
-- dialog:dismiss:text("<visible text>")
-- dialog:close:text("<visible text>")
-- dialog:accept:none
-- dialog:dismiss:none
-- dialog:close:none
-
-Intent: {step_intent}
-Code: {original_code}
-Error: {error_message}
-DOM: {pruned_dom or "N/A"}"""
+        prompt = build_dialog_extractor_prompt(
+            step_intent=step_intent,
+            original_code=original_code,
+            error_message=error_message,
+            dom_snapshot=pruned_dom,
+        )
 
         executor = LLMExecutor.get_instance()
 

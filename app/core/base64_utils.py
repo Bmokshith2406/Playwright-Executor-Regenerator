@@ -6,13 +6,13 @@ import re
 
 def normalize_base64(b64: str) -> bytes:
     """
-    Strict, Gemini-safe base64 decoder.
+    Strict image base64 decoder.
 
     - Removes data URL headers
     - Removes whitespace
     - Validates base64
     - Decodes to raw bytes
-    - Verifies PNG signature
+    - Verifies supported image signature
     """
 
     if not b64 or not isinstance(b64, str):
@@ -30,8 +30,13 @@ def normalize_base64(b64: str) -> bytes:
     except Exception as exc:
         raise ValueError("Invalid base64 encoding") from exc
 
-    # 🔒 HARD VALIDATION — PNG SIGNATURE
-    if image_bytes[:8] != b"\x89PNG\r\n\x1a\n":
-        raise ValueError("Decoded bytes are not a valid PNG image")
+    if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        return image_bytes
 
-    return image_bytes
+    if image_bytes[:3] == b"\xff\xd8\xff":
+        return image_bytes
+
+    if len(image_bytes) >= 12 and image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+        return image_bytes
+
+    raise ValueError("Decoded bytes are not a supported image")

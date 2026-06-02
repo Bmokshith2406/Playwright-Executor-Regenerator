@@ -6,6 +6,7 @@ import logging
 import re
 
 from app.core.llm_executor import LLMExecutor
+from app.core.prompts import build_step_modifier_prompt
 
 logger = logging.getLogger("step_modifier")
 
@@ -169,63 +170,13 @@ class StepModifier:
         error_message: Optional[str],
         failure_history: Optional[list[str]],
     ) -> str:
-        history_block = "N/A"
-
-        if failure_history:
-            formatted = []
-            for idx, failed_code in enumerate(failure_history, start=1):
-                formatted.append(f"Attempt {idx}:\n{failed_code}")
-            history_block = "\n\n".join(formatted)
-
-        # Prompt now explicitly instructs model not to change runtime data literals.
-        return f"""
-You are making a MINIMAL correction to Playwright Python STEP CODE
-that was judged INCORRECT by a verifier.
-
-This step has failed in previous attempts.
-
-Error message:
-{error_message or "N/A"}
-
-Previous failed attempts:
-{history_block}
-
-CRITICAL DATA RULE (MANDATORY):
-- DO NOT change any runtime data literals (string/number/boolean literals that affect runtime behavior).
-  Examples: .fill('john'), .type("abc"), expect(...).to_have_text("Done"), page.goto("https://..."), select option literal values, cookie/header literal values.
-- Locators/selectors (e.g., "input[name='username']") may be changed to fix selection problems.
-- Allowed minor literal edits: single <-> double quotes and whitespace only.
-- If you replace a literal with a variable, the variable MUST be assigned the EXACT SAME literal value in the same function body.
-
-You MUST NOT reuse any locator strategy, selector pattern, role, visible text,
-or interaction style used in ANY previous attempt.
-
-You MUST generate a DIFFERENT locator strategy.
-Do NOT reuse the same method.
-
-STRICT RULES (NON-NEGOTIABLE):
-- Do NOT add or remove lines
-- Do NOT reorder lines
-- ONLY edit existing expressions
-- Do NOT introduce new locators
-- Do NOT modify runtime fallback or dialog logic
-- No imports
-- No async def
-- No comments
-- One statement per line ONLY
-- No Special Characters 
-
-INTENT:
-{intent}
-
-VERIFIER FEEDBACK:
-{verifier_reason}
-
-CURRENT STEP BODY:
-{code}
-
-Return ONLY the corrected step body.
-""".strip()
+        return build_step_modifier_prompt(
+            intent=intent,
+            code=code,
+            verifier_reason=verifier_reason,
+            error_message=error_message or "N/A",
+            failure_history=failure_history,
+        )
 
     # ==================================================
     # SANITIZATION

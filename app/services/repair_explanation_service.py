@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import re
-import textwrap
 from typing import Optional, Dict, Any
 
 from app.core.llm_executor import LLMExecutor
 from app.core.dom_pruner import DomPruner
+from app.core.prompts import build_repair_explanation_prompt
 
 
 __all__ = ["RepairExplanationService"]
@@ -31,7 +31,7 @@ class RepairExplanationService:
       - preservation of return types and error behaviour (returns None on failure)
     """
 
-    DEFAULT_DOM_SNIPPET_MAX_CHARS: int = 1200
+    DEFAULT_DOM_SNIPPET_MAX_CHARS: int = 800
 
     FAILURE_TYPE_ENUM = (
         "LOCATOR_CHANGE",
@@ -173,49 +173,14 @@ class RepairExplanationService:
             (pruned_dom[: self.DOM_SNIPPET_MAX_CHARS] if pruned_dom else "N/A")
         )
 
-        # Use textwrap.dedent to avoid accidental leading spaces
-        prompt = textwrap.dedent(f"""
-        You are an expert Playwright test debugging analyst.
-
-        A Playwright automation step failed and was automatically repaired.
-
-        Your job is to explain WHY the failure happened and WHY the repair fixed it.
-
-        Return ONLY valid JSON.
-
-        Schema:
-
-        {{
-          "failure_reason": "Short explanation of why the original step failed",
-          "repair_action": "What change the repair introduced",
-          "why_previous_failed": "Detailed reasoning of the failure",
-          "why_repair_passed": "Detailed reasoning why the repaired code works",
-          "failure_type": "One of: LOCATOR_CHANGE, ELEMENT_NOT_VISIBLE, DOM_CHANGE, TIMING_ISSUE, ASSERTION_CHANGE, UNKNOWN",
-          "summary": "One concise sentence summarizing the repair"
-        }}
-
-        Step ID:
-        {step_id}
-
-        Step intent:
-        {step_intent}
-
-        Original code:
-        {original_code}
-
-        Repaired code:
-        {repaired_code}
-
-        Error logs:
-        {error_text}
-
-        DOM snapshot (pruned):
-        {dom_block}
-
-        Return ONLY JSON.
-        """)
-
-        return prompt.strip()
+        return build_repair_explanation_prompt(
+            step_id=step_id,
+            step_intent=step_intent,
+            original_code=original_code,
+            repaired_code=repaired_code,
+            error_text=error_text,
+            dom_snapshot=dom_block,
+        )
 
     # ==================================================
     # UTILITIES

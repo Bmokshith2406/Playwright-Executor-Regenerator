@@ -7,9 +7,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, UTC
 import logging
 import asyncio
-
-from celery import shared_task
-from celery.exceptions import MaxRetriesExceededError
+from pathlib import Path
 
 from app.tasks.celery_app import celery_app
 from app.core.config import settings
@@ -75,19 +73,22 @@ def repair_step_async(
     Returns:
         Dict containing repair result
     """
-    from app.services.cir_builder import CIRBuilder
-    from app.services.generator import StepCodeGenerator
-    from app.services.step_verifier import StepVerifier
+    from app.core.base64_utils import normalize_base64
+    from app.core.exceptions import StepNotRepairableError
     from app.models.step_repair import (
+        Artifacts,
         StepRepairRequest,
         ErrorClassification,
         ErrorDetails,
     )
     from app.core.database import get_repository, RepairRecord
     from app.core.metrics import get_metrics
+    from app.services.repair_pipeline import repair_pipeline_safe
     
     start_time = datetime.now(UTC)
-    task_id = self.request.id
+    request_meta = getattr(self, "request", None)
+    task_id = getattr(request_meta, "id", None) or f"repair-{datetime.now(UTC).timestamp()}"
+    retry_count = getattr(request_meta, "retries", 0)
     metrics = get_metrics()
     set_correlation_id(correlation_id)
     
@@ -97,55 +98,59 @@ def repair_step_async(
             "task_id": task_id,
             "step_id": step_id,
             "correlation_id": correlation_id,
-            "attempt": self.request.retries + 1,
+            "attempt": retry_count + 1,
         }
     )
     
     try:
-        # Build request
+        screenshot_bytes = normalize_base64(screenshot_base64) if screenshot_base64 else None
         request = StepRepairRequest(
             step_id=step_id,
             step_intent=step_intent,
             original_code=original_code,
             error_classification=ErrorClassification(type=error_type),
             error_details=ErrorDetails(message=error_message),
-            screenshot_base64=screenshot_base64,
-            dom_snapshot=dom_snapshot,
+            artifacts=Artifacts(
+                dom_snapshot=dom_snapshot,
+            ),
         )
         
-        # Run repair pipeline
         async def _repair():
-            cir_builder = CIRBuilder()
-            generator = StepCodeGenerator()
-            verifier = StepVerifier()
-            
-            # Build CIR
-            block, context = await cir_builder.build(request=request)
-            
-            # Generate code
-            generated = generator.generate(block)
-            
-            # Verify code
-            is_valid = await verifier.verify(
-                generated_code=generated,
-                intent=step_intent,
-                action_type=block.actions[0].action_type.value if block.actions else "unknown",
+            repaired_code, action_type = await repair_pipeline_safe(
+                request=request,
+                error_image_bytes=screenshot_bytes,
+                request_id=correlation_id or task_id,
             )
-            
             return {
-                "generated_code": generated,
-                "is_valid": is_valid,
-                "action_type": block.actions[0].action_type.value if block.actions else None,
+                "generated_code": repaired_code,
+                "action_type": action_type,
             }
-        
-        result = run_async(_repair())
+
+        try:
+            result = run_async(_repair())
+            is_valid = True
+            outcome = "success"
+        except StepNotRepairableError as exc:
+            result = {
+                "generated_code": None,
+                "action_type": "unknown",
+            }
+            is_valid = False
+            outcome = "not_repairable"
+            logger.info(
+                "Repair task determined step is not repairable",
+                extra={
+                    "task_id": task_id,
+                    "step_id": step_id,
+                    "reason": str(exc),
+                },
+            )
         
         duration_ms = int((datetime.now(UTC) - start_time).total_seconds() * 1000)
         
         # Record to database
         async def _record():
             repo = await get_repository()
-            outcome = "success" if result["is_valid"] else "partial"
             record = RepairRecord(
                 step_id=step_id,
                 original_code=original_code,
@@ -159,7 +164,7 @@ def repair_step_async(
                 request_id=correlation_id,
                 metadata={
                     "task_id": task_id,
-                    "attempts": self.request.retries + 1,
+                    "attempts": retry_count + 1,
                 }
             )
             await repo.save_repair(record)
@@ -168,7 +173,7 @@ def repair_step_async(
         
         # Record metrics
         metrics.repair_requests_total.inc(
-            outcome="success" if result["is_valid"] else "partial",
+            outcome=outcome,
             action_type=result["action_type"] or "unknown",
         )
         
@@ -178,16 +183,16 @@ def repair_step_async(
                 "task_id": task_id,
                 "step_id": step_id,
                 "duration_ms": duration_ms,
-                "is_valid": result["is_valid"],
+                "is_valid": is_valid,
             }
         )
         
         return {
-            "status": "success",
+            "status": outcome,
             "step_id": step_id,
             "task_id": task_id,
             "generated_code": result["generated_code"],
-            "is_valid": result["is_valid"],
+            "is_valid": is_valid,
             "duration_ms": duration_ms,
         }
         
@@ -198,7 +203,7 @@ def repair_step_async(
                 "task_id": task_id,
                 "step_id": step_id,
                 "error": str(e),
-                "attempt": self.request.retries + 1,
+                "attempt": retry_count + 1,
             },
             exc_info=True
         )
@@ -243,7 +248,8 @@ def execute_script_async(
     from app.core.metrics import get_metrics
     
     start_time = datetime.now(UTC)
-    task_id = self.request.id
+    request_meta = getattr(self, "request", None)
+    task_id = getattr(request_meta, "id", None) or f"execute-{datetime.now(UTC).timestamp()}"
     metrics = get_metrics()
     set_correlation_id(correlation_id)
     
@@ -274,6 +280,7 @@ def execute_script_async(
         # Record to database
         async def _record():
             repo = await get_repository()
+            metadata = getattr(result, "metadata", {}) or {}
             record = ExecutionRecord(
                 run_id=task_id,
                 script_path=script_path,
@@ -282,14 +289,15 @@ def execute_script_async(
                 duration_ms=duration_ms,
                 stdout=result.stdout[:10000] if result.stdout else None,
                 stderr=result.stderr[:10000] if result.stderr else None,
-                repairs_attempted=result.metadata.get("repairs_attempted", 0) if hasattr(result, "metadata") and result.metadata else 0,
+                repairs_attempted=metadata.get("repairs_attempted", 0),
+                repairs_successful=metadata.get("repairs_successful", 0),
                 request_id=correlation_id,
                 metadata={
                     "task_id": task_id,
                     "self_healing_enabled": enable_self_healing,
-                    "step_results": result.step_results,
-                    "execution_outcome": result.outcome.value,
-                    "error": result.error,
+                    "step_results": getattr(result, "step_results", None),
+                    "execution_outcome": getattr(getattr(result, "outcome", None), "value", None),
+                    "error": getattr(result, "error", None),
                 }
             )
             await repo.save_execution(record)
@@ -350,9 +358,13 @@ def batch_repair_steps(
     Returns:
         Dict containing batch repair results
     """
-    from celery import group
+    try:
+        from celery import group
+    except ImportError as exc:  # pragma: no cover - depends on optional celery install
+        raise RuntimeError("Celery is not installed in this environment") from exc
     
-    task_id = self.request.id
+    request_meta = getattr(self, "request", None)
+    task_id = getattr(request_meta, "id", None) or f"batch-{datetime.now(UTC).timestamp()}"
     set_correlation_id(correlation_id)
     
     logger.info(

@@ -16,6 +16,7 @@ from typing import Callable, Optional, Dict, Any
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
+from threading import Lock
 
 logger = logging.getLogger("metrics")
 
@@ -50,21 +51,24 @@ class Counter:
         self.description = description
         self.label_names = labels or []
         self._values: Dict[tuple, float] = {}
+        self._lock = Lock()
     
     def inc(self, value: float = 1.0, **labels):
         """Increment the counter."""
         key = self._make_key(labels)
-        self._values[key] = self._values.get(key, 0.0) + value
+        with self._lock:
+            self._values[key] = self._values.get(key, 0.0) + value
     
     def _make_key(self, labels: dict) -> tuple:
         return tuple(sorted(labels.items()))
     
     def collect(self) -> list:
         """Collect all values for export."""
-        return [
-            {"labels": dict(key), "value": value}
-            for key, value in self._values.items()
-        ]
+        with self._lock:
+            return [
+                {"labels": dict(key), "value": value}
+                for key, value in self._values.items()
+            ]
 
 
 class Gauge:
@@ -78,30 +82,35 @@ class Gauge:
         self.description = description
         self.label_names = labels or []
         self._values: Dict[tuple, float] = {}
+        self._lock = Lock()
     
     def set(self, value: float, **labels):
         """Set the gauge value."""
         key = self._make_key(labels)
-        self._values[key] = value
+        with self._lock:
+            self._values[key] = value
     
     def inc(self, value: float = 1.0, **labels):
         """Increment the gauge."""
         key = self._make_key(labels)
-        self._values[key] = self._values.get(key, 0.0) + value
+        with self._lock:
+            self._values[key] = self._values.get(key, 0.0) + value
     
     def dec(self, value: float = 1.0, **labels):
         """Decrement the gauge."""
         key = self._make_key(labels)
-        self._values[key] = self._values.get(key, 0.0) - value
+        with self._lock:
+            self._values[key] = self._values.get(key, 0.0) - value
     
     def _make_key(self, labels: dict) -> tuple:
         return tuple(sorted(labels.items()))
     
     def collect(self) -> list:
-        return [
-            {"labels": dict(key), "value": value}
-            for key, value in self._values.items()
-        ]
+        with self._lock:
+            return [
+                {"labels": dict(key), "value": value}
+                for key, value in self._values.items()
+            ]
 
 
 class Histogram:
@@ -127,25 +136,26 @@ class Histogram:
         self.label_names = labels or []
         self.buckets = buckets or self.DEFAULT_BUCKETS
         self._values: Dict[tuple, Dict[str, float]] = {}
+        self._lock = Lock()
     
     def observe(self, value: float, **labels):
         """Record an observation."""
         key = self._make_key(labels)
-        
-        if key not in self._values:
-            self._values[key] = {
-                "sum": 0.0,
-                "count": 0,
-                "buckets": {b: 0 for b in self.buckets},
-            }
-        
-        data = self._values[key]
-        data["sum"] += value
-        data["count"] += 1
-        
-        for bucket in self.buckets:
-            if value <= bucket:
-                data["buckets"][bucket] += 1
+        with self._lock:
+            if key not in self._values:
+                self._values[key] = {
+                    "sum": 0.0,
+                    "count": 0,
+                    "buckets": {b: 0 for b in self.buckets},
+                }
+            
+            data = self._values[key]
+            data["sum"] += value
+            data["count"] += 1
+            
+            for bucket in self.buckets:
+                if value <= bucket:
+                    data["buckets"][bucket] += 1
     
     def _make_key(self, labels: dict) -> tuple:
         return tuple(sorted(labels.items()))
@@ -160,15 +170,16 @@ class Histogram:
             self.observe(time.perf_counter() - start, **labels)
     
     def collect(self) -> list:
-        return [
-            {
-                "labels": dict(key),
-                "sum": data["sum"],
-                "count": data["count"],
-                "buckets": data["buckets"],
-            }
-            for key, data in self._values.items()
-        ]
+        with self._lock:
+            return [
+                {
+                    "labels": dict(key),
+                    "sum": data["sum"],
+                    "count": data["count"],
+                    "buckets": dict(data["buckets"]),
+                }
+                for key, data in self._values.items()
+            ]
 
 
 # ==================================================

@@ -15,10 +15,38 @@ from app.core.metrics import get_metrics
 
 logger = logging.getLogger("pipeline.repair")
 
-_cir_builder = CIRBuilder()
-_generator = StepCodeGenerator()
-_verifier = StepVerifier()
-_modifier = StepModifier()
+_cir_builder: Optional[CIRBuilder] = None
+_generator: Optional[StepCodeGenerator] = None
+_verifier: Optional[StepVerifier] = None
+_modifier: Optional[StepModifier] = None
+
+
+def _get_cir_builder() -> CIRBuilder:
+    global _cir_builder
+    if _cir_builder is None:
+        _cir_builder = CIRBuilder()
+    return _cir_builder
+
+
+def _get_generator() -> StepCodeGenerator:
+    global _generator
+    if _generator is None:
+        _generator = StepCodeGenerator()
+    return _generator
+
+
+def _get_verifier() -> StepVerifier:
+    global _verifier
+    if _verifier is None:
+        _verifier = StepVerifier()
+    return _verifier
+
+
+def _get_modifier() -> StepModifier:
+    global _modifier
+    if _modifier is None:
+        _modifier = StepModifier()
+    return _modifier
 
 def _normalize_code_for_compare(code: Optional[str]) -> str:
     if not code:
@@ -46,8 +74,13 @@ async def execute_repair_pipeline(
         req.artifacts.error_image_bytes = error_image_bytes
 
     try:
+        cir_builder = _get_cir_builder()
+        generator = _get_generator()
+        verifier = _get_verifier()
+        modifier = _get_modifier()
+
         with metrics.repair_pipeline_stage_duration.time(stage="cir_build"):
-            block, context = await _cir_builder.build(request=req)
+            block, context = await cir_builder.build(request=req)
 
         action_type = (
             block.actions[0].action_type
@@ -71,9 +104,9 @@ async def execute_repair_pipeline(
             code_lines: list[str] = []
             for action in block.actions:
                 if action.action_type == ActionType.handle_dialog:
-                    code_lines.extend(_generator.generate(action, original_lines=original_lines))
+                    code_lines.extend(generator.generate(action, original_lines=original_lines))
                 else:
-                    code_lines.extend(_generator.generate(action))
+                    code_lines.extend(generator.generate(action))
             candidate_code = "\n".join(code_lines).strip()
 
         # Fallback block shortcut
@@ -84,7 +117,7 @@ async def execute_repair_pipeline(
         # Verifier Pass #1
         with metrics.repair_pipeline_stage_duration.time(stage="verification_1"):
             failure_history = [*(req.previous_failed_codes or []), req.original_code]
-            verdict_1 = await _verifier.verify(
+            verdict_1 = await verifier.verify(
                 intent=block.intent,
                 generated_code=candidate_code,
                 matched_script=getattr(context, "matched_script", None),
@@ -98,7 +131,7 @@ async def execute_repair_pipeline(
 
         # Modifier
         with metrics.repair_pipeline_stage_duration.time(stage="modification"):
-            modified_code = await _modifier.modify(
+            modified_code = await modifier.modify(
                 intent=block.intent,
                 generated_code=candidate_code,
                 verifier_reason=verdict_1.get("reason") if verdict_1 else None,
@@ -119,7 +152,7 @@ async def execute_repair_pipeline(
 
         # Verifier Pass #2
         with metrics.repair_pipeline_stage_duration.time(stage="verification_2"):
-            verdict_2 = await _verifier.verify(
+            verdict_2 = await verifier.verify(
                 intent=block.intent,
                 generated_code=modified_code,
                 matched_script=getattr(context, "matched_script", None),

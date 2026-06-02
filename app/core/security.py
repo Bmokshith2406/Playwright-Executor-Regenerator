@@ -352,7 +352,9 @@ class SandboxGuard:
     
     def __init__(self):
         import re
+        from app.executors.sandbox import ScriptSecurityValidator
         self._patterns = [re.compile(p) for p in self.FORBIDDEN_PATTERNS]
+        self._validator = ScriptSecurityValidator(strict_mode=True)
     
     def validate_script(self, script_content: str) -> tuple[bool, Optional[str]]:
         """
@@ -361,6 +363,10 @@ class SandboxGuard:
         Returns:
             Tuple of (is_safe: bool, reason: Optional[str])
         """
+        is_safe, reason = self._validator.validate(script_content)
+        if not is_safe:
+            return False, reason
+
         import ast
         
         # Check for forbidden patterns
